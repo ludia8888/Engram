@@ -102,22 +102,67 @@ class RetrievalEngine:
         lexical_candidate_ids = set(
             self.store.candidate_event_ids_for_search_terms(query_candidate_terms(query))
         )
-        semantic_candidate_ids = set(self.store.event_ids_with_embeddings(self.embedder.version))
-        initial_candidate_ids = sorted(lexical_candidate_ids | semantic_candidate_ids)
-        if not initial_candidate_ids:
-            return []
-        direct_events = visible_events_provider(time_window, initial_candidate_ids)
-        if not direct_events:
-            return []
+        direct_events: list[Event]
+        lexical_scores: dict[str, float]
+        if lexical_candidate_ids:
+            direct_events = visible_events_provider(time_window, sorted(lexical_candidate_ids))
+            if not direct_events:
+                return []
+            lexical_scores = {
+                event.id: (
+                    _score_event_lexical(event, tokens)
+                    if event.id in lexical_candidate_ids
+                    else 0.0
+                )
+                for event in direct_events
+            }
+            lexical_hit_event_ids = [
+                event.id
+                for event in direct_events
+                if lexical_scores.get(event.id, 0.0) > 0
+            ]
+            if lexical_hit_event_ids:
+                lexical_hit_entity_ids = sorted(
+                    {
+                        entity_id
+                        for entity_ids in self.store.event_entity_ids_for_events(
+                            lexical_hit_event_ids
+                        ).values()
+                        for entity_id in entity_ids
+                    }
+                )
+                semantic_candidate_ids = set(
+                    self.store.event_ids_with_embeddings_for_entities(
+                        lexical_hit_entity_ids,
+                        embedder_version=self.embedder.version,
+                    )
+                )
+                loaded_event_ids = {event.id for event in direct_events}
+                extra_semantic_ids = sorted(semantic_candidate_ids - loaded_event_ids)
+                if extra_semantic_ids:
+                    for event in visible_events_provider(time_window, extra_semantic_ids):
+                        if event.id in loaded_event_ids:
+                            continue
+                        direct_events.append(event)
+                        loaded_event_ids.add(event.id)
+                        lexical_scores[event.id] = 0.0
+            else:
+                semantic_candidate_ids = self.store.event_ids_with_embeddings(self.embedder.version)
+                if not semantic_candidate_ids:
+                    return []
+                direct_events = visible_events_provider(time_window, semantic_candidate_ids)
+                if not direct_events:
+                    return []
+                lexical_scores = {event.id: 0.0 for event in direct_events}
+        else:
+            semantic_candidate_ids = self.store.event_ids_with_embeddings(self.embedder.version)
+            if not semantic_candidate_ids:
+                return []
+            direct_events = visible_events_provider(time_window, semantic_candidate_ids)
+            if not direct_events:
+                return []
+            lexical_scores = {event.id: 0.0 for event in direct_events}
 
-        lexical_scores = {
-            event.id: (
-                _score_event_lexical(event, tokens)
-                if not lexical_candidate_ids or event.id in lexical_candidate_ids
-                else 0.0
-            )
-            for event in direct_events
-        }
         semantic_scores = self._semantic_scores(query, direct_events)
 
         scored_events_by_id: dict[str, ScoredEvent] = {}

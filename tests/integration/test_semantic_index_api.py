@@ -564,6 +564,7 @@ def test_search_passes_candidate_ids_into_visible_event_fetch(tmp_path, monkeypa
         embedder=StaticEmbedder(
             mapping={
                 'entity.create {"attrs": {"location": "Busan"}, "id": "user:alice", "type": "user"} manual': [1.0, 0.0, 0.0],
+                'entity.create {"attrs": {"location": "Seoul"}, "id": "user:bob", "type": "user"} manual': [0.0, 1.0, 0.0],
             }
         ),
     )
@@ -571,6 +572,11 @@ def test_search_passes_candidate_ids_into_visible_event_fetch(tmp_path, monkeypa
         "entity.create",
         {"id": "user:alice", "type": "user", "attrs": {"location": "Busan"}},
         observed_at=dt("2026-05-01T10:00:00Z"),
+    )
+    other_event_id = mem.append(
+        "entity.create",
+        {"id": "user:bob", "type": "user", "attrs": {"location": "Seoul"}},
+        observed_at=dt("2026-05-01T10:05:00Z"),
     )
     mem.flush("index")
 
@@ -589,7 +595,8 @@ def test_search_passes_candidate_ids_into_visible_event_fetch(tmp_path, monkeypa
     assert results[0].entity_id == "user:alice"
     assert captured_event_ids
     assert captured_event_ids[0] is not None
-    assert event_id in captured_event_ids[0]
+    assert captured_event_ids[0] == [event_id]
+    assert other_event_id not in captured_event_ids[0]
 
     mem.close()
 

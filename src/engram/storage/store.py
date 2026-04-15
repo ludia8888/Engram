@@ -734,6 +734,28 @@ class EventStore:
             for row in rows
         }
 
+    def event_ids_with_embeddings_for_entities(
+        self,
+        entity_ids: list[str],
+        *,
+        embedder_version: str,
+    ) -> list[str]:
+        if not entity_ids:
+            return []
+        placeholders = ",".join("?" for _ in entity_ids)
+        rows = self.conn.execute(
+            f"""
+            SELECT DISTINCT ee.event_id
+            FROM event_entities ee
+            JOIN vec_events v ON v.event_id = ee.event_id
+            WHERE ee.entity_id IN ({placeholders})
+              AND v.embedder_version = ?
+            ORDER BY ee.event_id ASC
+            """,
+            [*entity_ids, embedder_version],
+        ).fetchall()
+        return [str(row["event_id"]) for row in rows]
+
     def materialize_current_entity(self, entity_id: str) -> Entity | None:
         folded = self.fold_entity_events(entity_id, self.entity_events_known_current(entity_id))
         if folded is None:
