@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from engram import Engram
+import pytest
+
+from engram import Engram, ValidationError
 from engram.types import ExtractedEvent, QueueItem
 
 from tests.conftest import dt
@@ -188,6 +190,83 @@ def test_context_known_renders_relation_changes_and_current_relation_summary(tmp
     mem.close()
 
 
+def test_get_relations_known_returns_outgoing_and_incoming_edges(tmp_path):
+    mem = Engram(user_id="alice", path=str(tmp_path))
+    _append_people(mem)
+    mem.append(
+        "relation.create",
+        {
+            "source": "user:alice",
+            "target": "user:bob",
+            "type": "manager",
+            "attrs": {"scope": "engram"},
+        },
+        observed_at=dt("2026-05-01T10:00:00Z"),
+        effective_at_start=dt("2026-05-01T00:00:00Z"),
+        source_role="manual",
+        time_confidence="exact",
+    )
+
+    alice_relations = mem.get_relations("user:alice")
+    bob_relations = mem.get_relations("user:bob")
+
+    assert len(alice_relations) == 1
+    assert alice_relations[0].direction == "outgoing"
+    assert alice_relations[0].other_entity_id == "user:bob"
+    assert len(bob_relations) == 1
+    assert bob_relations[0].direction == "incoming"
+    assert bob_relations[0].other_entity_id == "user:alice"
+
+    mem.close()
+
+
+def test_get_relations_known_at_and_known_time_window_validation(tmp_path, monkeypatch):
+    mem = Engram(user_id="alice", path=str(tmp_path))
+    _append_people(mem)
+    monkeypatch.setattr("engram.engram.utcnow", lambda: dt("2026-05-01T10:00:05Z"))
+    mem.append(
+        "relation.create",
+        {
+            "source": "user:alice",
+            "target": "user:bob",
+            "type": "manager",
+            "attrs": {"scope": "engram"},
+        },
+        observed_at=dt("2026-05-01T10:00:00Z"),
+        effective_at_start=dt("2026-05-01T00:00:00Z"),
+        source_role="manual",
+        time_confidence="exact",
+    )
+    monkeypatch.setattr("engram.engram.utcnow", lambda: dt("2026-05-03T10:00:05Z"))
+    mem.append(
+        "relation.delete",
+        {
+            "source": "user:alice",
+            "target": "user:bob",
+            "type": "manager",
+        },
+        observed_at=dt("2026-05-03T10:00:00Z"),
+        effective_at_start=dt("2026-05-03T00:00:00Z"),
+        source_role="manual",
+        time_confidence="exact",
+    )
+
+    before = mem.get_relations("user:alice", time_mode="known", at=dt("2026-05-02T00:00:00Z"))
+    after = mem.get_relations("user:alice", time_mode="known", at=dt("2026-05-04T00:00:00Z"))
+
+    assert before and before[0].relation_type == "manager"
+    assert after == []
+
+    with pytest.raises(ValidationError, match="time_window is not supported"):
+        mem.get_relations(
+            "user:alice",
+            time_mode="known",
+            time_window=(dt("2026-05-01T00:00:00Z"), dt("2026-05-02T00:00:00Z")),
+        )
+
+    mem.close()
+
+
 def test_context_valid_only_shows_relations_active_in_requested_window(tmp_path):
     mem = Engram(user_id="alice", path=str(tmp_path))
     _append_people(mem)
@@ -234,6 +313,123 @@ def test_context_valid_only_shows_relations_active_in_requested_window(tmp_path)
     assert "attrs_as_of_window_end" in before
     assert "manager -> user:bob" in before
     assert "manager -> user:bob" not in after
+
+    mem.close()
+
+
+def test_get_relations_valid_point_and_window_semantics(tmp_path):
+    mem = Engram(user_id="alice", path=str(tmp_path))
+    _append_people(mem)
+    mem.append(
+        "relation.create",
+        {
+            "source": "user:alice",
+            "target": "user:bob",
+            "type": "mentor",
+            "attrs": {"cadence": "weekly"},
+        },
+        observed_at=dt("2026-05-05T10:00:00Z"),
+        effective_at_start=dt("2026-05-05T00:00:00Z"),
+        source_role="manual",
+        time_confidence="exact",
+    )
+    mem.append(
+        "relation.delete",
+        {
+            "source": "user:alice",
+            "target": "user:bob",
+            "type": "mentor",
+        },
+        observed_at=dt("2026-05-06T10:00:00Z"),
+        effective_at_start=dt("2026-05-06T00:00:00Z"),
+        source_role="manual",
+        time_confidence="exact",
+    )
+
+    point_before = mem.get_relations("user:alice", time_mode="valid", at=dt("2026-05-05T12:00:00Z"))
+    point_after = mem.get_relations("user:alice", time_mode="valid", at=dt("2026-05-06T12:00:00Z"))
+    window = mem.get_relations(
+        "user:alice",
+        time_mode="valid",
+        time_window=(dt("2026-05-01T00:00:00Z"), dt("2026-05-10T00:00:00Z")),
+    )
+
+    assert point_before and point_before[0].relation_type == "mentor"
+    assert point_after == []
+    assert window and window[0].relation_type == "mentor"
+
+    with pytest.raises(ValidationError, match="either at or time_window"):
+        mem.get_relations(
+            "user:alice",
+            time_mode="valid",
+            at=dt("2026-05-05T12:00:00Z"),
+            time_window=(dt("2026-05-01T00:00:00Z"), dt("2026-05-10T00:00:00Z")),
+        )
+    with pytest.raises(ValidationError, match="must be before"):
+        mem.get_relations(
+            "user:alice",
+            time_mode="valid",
+            time_window=(dt("2026-05-10T00:00:00Z"), dt("2026-05-10T00:00:00Z")),
+        )
+
+    mem.close()
+
+
+def test_get_relations_valid_window_returns_last_overlapping_attrs(tmp_path):
+    mem = Engram(user_id="alice", path=str(tmp_path))
+    _append_people(mem)
+    mem.append(
+        "relation.create",
+        {
+            "source": "user:alice",
+            "target": "user:bob",
+            "type": "mentor",
+            "attrs": {"cadence": "weekly", "scope": "engram"},
+        },
+        observed_at=dt("2026-05-01T10:00:00Z"),
+        effective_at_start=dt("2026-05-01T00:00:00Z"),
+        source_role="manual",
+        time_confidence="exact",
+    )
+    mem.append(
+        "relation.update",
+        {
+            "source": "user:alice",
+            "target": "user:bob",
+            "type": "mentor",
+            "attrs": {"cadence": "daily"},
+        },
+        observed_at=dt("2026-05-03T10:00:00Z"),
+        effective_at_start=dt("2026-05-03T00:00:00Z"),
+        source_role="manual",
+        time_confidence="exact",
+    )
+    mem.append(
+        "relation.delete",
+        {
+            "source": "user:alice",
+            "target": "user:bob",
+            "type": "mentor",
+        },
+        observed_at=dt("2026-05-05T10:00:00Z"),
+        effective_at_start=dt("2026-05-05T00:00:00Z"),
+        source_role="manual",
+        time_confidence="exact",
+    )
+
+    early_window = mem.get_relations(
+        "user:alice",
+        time_mode="valid",
+        time_window=(dt("2026-05-01T00:00:00Z"), dt("2026-05-02T00:00:00Z")),
+    )
+    full_window = mem.get_relations(
+        "user:alice",
+        time_mode="valid",
+        time_window=(dt("2026-05-01T00:00:00Z"), dt("2026-05-04T00:00:00Z")),
+    )
+
+    assert early_window and early_window[0].attrs == {"cadence": "weekly", "scope": "engram"}
+    assert full_window and full_window[0].attrs == {"cadence": "daily", "scope": "engram"}
 
     mem.close()
 
@@ -369,6 +565,11 @@ def test_deleted_endpoint_retracts_relation_from_search_context_and_projection(t
     assert "user:alice" not in mem.projector.current_relation_snapshot()
     assert "user:bob" not in mem.projector.current_relation_snapshot()
 
+    history = mem.relation_history("user:alice")
+    assert len(history) == 1
+    assert history[0].action == "create"
+    assert history[0].other_entity_id == "user:bob"
+
     mem.close()
 
 
@@ -396,6 +597,11 @@ def test_relation_update_without_prior_create_is_treated_as_active_relation(tmp_
     assert "mentor -> user:bob" in text
     assert "cadence': 'weekly'" in text
     assert mem.projector.current_relation_snapshot()["user:alice"][0].relation_type == "mentor"
+    relations = mem.get_relations("user:alice")
+    history = mem.relation_history("user:alice")
+    assert relations and relations[0].relation_type == "mentor"
+    assert len(history) == 1
+    assert history[0].action == "update"
 
     mem.close()
 
@@ -549,5 +755,135 @@ def test_reprocess_retracts_stale_relation_from_search_context_and_projection(tm
             max_tokens=400,
         )
     )
+
+    mem.close()
+
+
+def test_relation_history_returns_create_update_delete_and_supports_filters(tmp_path):
+    mem = Engram(user_id="alice", path=str(tmp_path))
+    _append_people(mem)
+    mem.append(
+        "relation.create",
+        {
+            "source": "user:alice",
+            "target": "user:bob",
+            "type": "manager",
+            "attrs": {"scope": "engram"},
+        },
+        observed_at=dt("2026-05-01T10:00:00Z"),
+        effective_at_start=dt("2026-05-01T00:00:00Z"),
+        source_role="manual",
+        time_confidence="exact",
+    )
+    mem.append(
+        "relation.update",
+        {
+            "source": "user:alice",
+            "target": "user:bob",
+            "type": "manager",
+            "attrs": {"seniority": "staff"},
+        },
+        observed_at=dt("2026-05-02T10:00:00Z"),
+        effective_at_start=dt("2026-05-02T00:00:00Z"),
+        source_role="manual",
+        time_confidence="exact",
+    )
+    mem.append(
+        "relation.delete",
+        {
+            "source": "user:alice",
+            "target": "user:bob",
+            "type": "manager",
+        },
+        observed_at=dt("2026-05-03T10:00:00Z"),
+        effective_at_start=dt("2026-05-03T00:00:00Z"),
+        source_role="manual",
+        time_confidence="exact",
+    )
+
+    history = mem.relation_history("user:alice")
+    filtered = mem.relation_history("user:alice", relation_type="manager", other_entity_id="user:bob")
+
+    assert [entry.action for entry in history] == ["create", "update", "delete"]
+    assert all(entry.direction == "outgoing" for entry in history)
+    assert len(filtered) == 3
+
+    mem.close()
+
+
+def test_relation_history_returns_incoming_direction_for_target_entity(tmp_path):
+    mem = Engram(user_id="alice", path=str(tmp_path))
+    _append_people(mem)
+    mem.append(
+        "relation.create",
+        {
+            "source": "user:alice",
+            "target": "user:bob",
+            "type": "manager",
+            "attrs": {"scope": "engram"},
+        },
+        observed_at=dt("2026-05-01T10:00:00Z"),
+        effective_at_start=dt("2026-05-01T00:00:00Z"),
+        source_role="manual",
+        time_confidence="exact",
+    )
+
+    history = mem.relation_history("user:bob")
+
+    assert len(history) == 1
+    assert history[0].direction == "incoming"
+    assert history[0].other_entity_id == "user:alice"
+
+    mem.close()
+
+
+def test_relation_history_hides_superseded_runs_for_known_and_valid(tmp_path, monkeypatch):
+    extractor = SequenceExtractor(
+        [
+            [
+                ExtractedEvent(
+                    type="relation.create",
+                    data={
+                        "source": "user:alice",
+                        "target": "user:bob",
+                        "type": "manager",
+                        "attrs": {"scope": "engram"},
+                    },
+                    effective_at_start=dt("2026-05-01T00:00:00Z"),
+                    source_role="user",
+                    time_confidence="exact",
+                )
+            ],
+            [
+                ExtractedEvent(
+                    type="relation.create",
+                    data={
+                        "source": "user:alice",
+                        "target": "user:bob",
+                        "type": "mentor",
+                        "attrs": {"scope": "engram"},
+                    },
+                    effective_at_start=dt("2026-05-02T00:00:00Z"),
+                    source_role="user",
+                    time_confidence="exact",
+                )
+            ],
+        ]
+    )
+    mem = Engram(user_id="alice", path=str(tmp_path), extractor=extractor)
+    _append_people(mem)
+    ack = mem.turn("Bob role changed", "Okay", observed_at=dt("2026-05-01T10:00:00Z"))
+
+    monkeypatch.setattr("engram.canonical.utcnow", lambda: dt("2026-05-01T10:00:05Z"))
+    mem.flush("canonical")
+    monkeypatch.setattr("engram.canonical.utcnow", lambda: dt("2026-05-02T10:00:00Z"))
+    mem.reprocess(from_turn_id=ack.turn_id, to_turn_id=ack.turn_id)
+    monkeypatch.setattr("engram.engram.utcnow", lambda: dt("2026-05-03T00:00:00Z"))
+
+    known_history = mem.relation_history("user:alice", time_mode="known")
+    valid_history = mem.relation_history("user:alice", time_mode="valid")
+
+    assert [entry.relation_type for entry in known_history] == ["mentor"]
+    assert [entry.relation_type for entry in valid_history] == ["mentor"]
 
     mem.close()

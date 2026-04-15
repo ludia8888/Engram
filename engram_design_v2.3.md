@@ -727,6 +727,8 @@ def flush(
 Status:
 - `get()`, `get_known_at()`, `known_history()` = `Implemented (Phase 1)`
 - `get_valid_at()`, `valid_history()` = `Implemented (Phase 4 PR1)`
+- `get_relations()` = `Implemented (Phase 7 PR1)`
+- `relation_history()` = `Implemented (Phase 7 PR1)`
 
 ```python
 def get(self, entity_id: str) -> Entity | None:
@@ -743,10 +745,40 @@ def known_history(self, entity_id: str, attr: str | None = None) -> list[History
 
 def valid_history(self, entity_id: str, attr: str | None = None) -> list[HistoryEntry]:
     ...
+
+def get_relations(
+    self,
+    entity_id: str,
+    *,
+    time_mode: Literal["known", "valid"] = "known",
+    at: datetime | None = None,
+    time_window: tuple[datetime, datetime] | None = None,
+) -> list[RelationEdge]:
+    ...
+
+def relation_history(
+    self,
+    entity_id: str,
+    *,
+    relation_type: str | None = None,
+    other_entity_id: str | None = None,
+    time_mode: Literal["known", "valid"] = "known",
+) -> list[RelationHistoryEntry]:
+    ...
 ```
 
 제거된 API:
 - `get_at()`는 v2.3에서 삭제한다. 의미가 둘로 갈라지기 때문이다.
+
+현재 구현 규칙:
+- `get_relations()`는 entity-centric relation adjacency 조회만 지원한다.
+- `time_mode="known"` relation read는 `at`만 허용하고, `time_window`는 허용하지 않는다.
+- `time_mode="valid"` relation read는 point-in-time(`at`) 또는 window(`time_window`) 둘 중 하나만 받는다.
+- `time_mode="valid"` relation read에서 `time_window=(start, end)`는 `start < end`여야 한다.
+- `time_mode="valid"` + `time_window=(start, end)`일 때 `RelationEdge.attrs`는 window 전체 요약이 아니라, 그 구간과 겹친 **마지막 active state의 attrs**를 반환한다.
+- `relation_history()`는 현재 visible relation event log를 그대로 돌려주며, current active edge snapshot diff를 계산하지 않는다.
+- `relation_history()`는 endpoint entity가 지금 죽어 있어도 과거 relation event 자체는 유지해서 보여준다.
+- `relation.update`는 prior create가 없어도 upsert로 해석되고, relation history에서도 그대로 `update` action으로 남는다.
 
 ### 7.6 Retrieval API
 
@@ -880,6 +912,27 @@ class HistoryEntry:
     attr: str
     old_value: Any
     new_value: Any
+    observed_at: datetime
+    effective_at_start: datetime | None
+    effective_at_end: datetime | None
+    recorded_at: datetime
+    reason: str | None
+    confidence: float | None
+    basis: Literal["known", "valid"]
+    event_id: str
+```
+
+### 8.4 RelationHistoryEntry
+
+```python
+@dataclass
+class RelationHistoryEntry:
+    entity_id: str
+    other_entity_id: str
+    relation_type: str
+    direction: Literal["outgoing", "incoming"]
+    action: Literal["create", "update", "delete"]
+    attrs: dict[str, Any]
     observed_at: datetime
     effective_at_start: datetime | None
     effective_at_end: datetime | None
