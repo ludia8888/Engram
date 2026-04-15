@@ -164,13 +164,16 @@ class EventStore:
         ).fetchall()
         return [str(row[0]) for row in rows]
 
-    def successful_source_turn_ids(self) -> set[str]:
+    def successful_source_turn_ids(self, extractor_version: str) -> set[str]:
         rows = self.conn.execute(
             """
             SELECT DISTINCT source_turn_id
             FROM extraction_runs
             WHERE status = 'SUCCEEDED'
+              AND extractor_version = ?
             """
+            ,
+            (extractor_version,),
         ).fetchall()
         return {str(row[0]) for row in rows}
 

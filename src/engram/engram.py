@@ -57,6 +57,7 @@ class Engram:
                 projector=self.projector,
                 work_queue=self.queue,
                 queue_put_timeout=self.queue_put_timeout,
+                extractor_version=self.extractor.version,
             )
             self.recovery.catch_up_on_startup()
         except BaseException:

@@ -69,7 +69,7 @@ def test_flush_canonical_drains_queue_records_run_and_appends_events(tmp_path):
     assert mem.queue.qsize() == 0
     assert mem.store.count_extraction_runs() == 1
     assert mem.store.count_events() == 1
-    assert mem.store.successful_source_turn_ids() == {ack.turn_id}
+    assert mem.store.successful_source_turn_ids(extractor.version) == {ack.turn_id}
     assert mem.get("user:alice").attrs == {"diet": "vegetarian"}
 
     run = mem.store.list_extraction_runs()[0]
@@ -94,7 +94,7 @@ def test_flush_canonical_records_success_even_when_extractor_emits_no_events(tmp
     assert mem.queue.qsize() == 0
     assert mem.store.count_extraction_runs() == 1
     assert mem.store.count_events() == 0
-    assert mem.store.successful_source_turn_ids() == {ack.turn_id}
+    assert mem.store.successful_source_turn_ids(mem.extractor.version) == {ack.turn_id}
 
     mem.close()
 

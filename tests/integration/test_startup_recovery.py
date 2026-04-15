@@ -61,6 +61,48 @@ def test_startup_catch_up_skips_turns_already_linked_to_canonical_events(tmp_pat
     second.close()
 
 
+def test_startup_catch_up_requeues_turn_when_extractor_version_changes(tmp_path):
+    class NoopExtractor:
+        version = "noop-v1"
+
+        def extract(self, item):
+            return []
+
+    class RealExtractor:
+        version = "real-v2"
+
+        def extract(self, item):
+            return [
+                ExtractedEvent(
+                    type="entity.create",
+                    data={
+                        "id": "user:alice",
+                        "type": "user",
+                        "attrs": {"diet": "vegetarian"},
+                    },
+                    source_role="user",
+                    time_confidence="exact",
+                )
+            ]
+
+    first = Engram(user_id="alice", path=str(tmp_path), extractor=NoopExtractor())
+    ack = first.turn(
+        user="난 채식주의자야",
+        assistant="알겠어, 식단 선호로 기억할게.",
+        observed_at=dt("2026-05-01T10:00:00Z"),
+    )
+    first.flush("canonical")
+    first.close()
+
+    second = Engram(user_id="alice", path=str(tmp_path), extractor=RealExtractor())
+
+    assert second.queue.qsize() == 1
+    queued = second.queue.get_nowait()
+    assert queued.turn_id == ack.turn_id
+
+    second.close()
+
+
 def test_startup_recovery_rebuilds_pending_projection_snapshot(tmp_path):
     first = Engram(user_id="alice", path=str(tmp_path))
     first.append(

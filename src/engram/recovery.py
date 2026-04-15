@@ -17,12 +17,14 @@ class RecoveryService:
         projector: Projector,
         work_queue: queue.Queue[QueueItem],
         queue_put_timeout: float,
+        extractor_version: str,
     ):
         self.raw_log = raw_log
         self.store = store
         self.projector = projector
         self.work_queue = work_queue
         self.queue_put_timeout = queue_put_timeout
+        self.extractor_version = extractor_version
 
     def catch_up_on_startup(self) -> int:
         while self.store.count_dirty_ranges() > 0:
@@ -30,7 +32,7 @@ class RecoveryService:
             if rebuilt == 0 and self.store.count_dirty_ranges() > 0:
                 raise RuntimeError("startup projection recovery made no progress")
 
-        processed_turn_ids = self.store.successful_source_turn_ids()
+        processed_turn_ids = self.store.successful_source_turn_ids(self.extractor_version)
         enqueued = 0
         for turn in self.raw_log.raw_all():
             if turn.id in processed_turn_ids:
