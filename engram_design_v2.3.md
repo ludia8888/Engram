@@ -774,6 +774,8 @@ def relation_history(
 - `get_relations()`는 entity-centric relation adjacency 조회만 지원한다.
 - `time_mode="known"` relation read는 `at`만 허용하고, `time_window`는 허용하지 않는다.
 - `time_mode="valid"` relation read는 point-in-time(`at`) 또는 window(`time_window`) 둘 중 하나만 받는다.
+- `time_mode="valid"` relation read에서 `time_window=(start, end)`는 `start < end`여야 한다.
+- `time_mode="valid"` + `time_window=(start, end)`일 때 `RelationEdge.attrs`는 window 전체 요약이 아니라, 그 구간과 겹친 **마지막 active state의 attrs**를 반환한다.
 - `relation_history()`는 현재 visible relation event log를 그대로 돌려주며, current active edge snapshot diff를 계산하지 않는다.
 - `relation_history()`는 endpoint entity가 지금 죽어 있어도 과거 relation event 자체는 유지해서 보여준다.
 - `relation.update`는 prior create가 없어도 upsert로 해석되고, relation history에서도 그대로 `update` action으로 남는다.

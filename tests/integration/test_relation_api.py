@@ -365,6 +365,71 @@ def test_get_relations_valid_point_and_window_semantics(tmp_path):
             at=dt("2026-05-05T12:00:00Z"),
             time_window=(dt("2026-05-01T00:00:00Z"), dt("2026-05-10T00:00:00Z")),
         )
+    with pytest.raises(ValidationError, match="must be before"):
+        mem.get_relations(
+            "user:alice",
+            time_mode="valid",
+            time_window=(dt("2026-05-10T00:00:00Z"), dt("2026-05-10T00:00:00Z")),
+        )
+
+    mem.close()
+
+
+def test_get_relations_valid_window_returns_last_overlapping_attrs(tmp_path):
+    mem = Engram(user_id="alice", path=str(tmp_path))
+    _append_people(mem)
+    mem.append(
+        "relation.create",
+        {
+            "source": "user:alice",
+            "target": "user:bob",
+            "type": "mentor",
+            "attrs": {"cadence": "weekly", "scope": "engram"},
+        },
+        observed_at=dt("2026-05-01T10:00:00Z"),
+        effective_at_start=dt("2026-05-01T00:00:00Z"),
+        source_role="manual",
+        time_confidence="exact",
+    )
+    mem.append(
+        "relation.update",
+        {
+            "source": "user:alice",
+            "target": "user:bob",
+            "type": "mentor",
+            "attrs": {"cadence": "daily"},
+        },
+        observed_at=dt("2026-05-03T10:00:00Z"),
+        effective_at_start=dt("2026-05-03T00:00:00Z"),
+        source_role="manual",
+        time_confidence="exact",
+    )
+    mem.append(
+        "relation.delete",
+        {
+            "source": "user:alice",
+            "target": "user:bob",
+            "type": "mentor",
+        },
+        observed_at=dt("2026-05-05T10:00:00Z"),
+        effective_at_start=dt("2026-05-05T00:00:00Z"),
+        source_role="manual",
+        time_confidence="exact",
+    )
+
+    early_window = mem.get_relations(
+        "user:alice",
+        time_mode="valid",
+        time_window=(dt("2026-05-01T00:00:00Z"), dt("2026-05-02T00:00:00Z")),
+    )
+    full_window = mem.get_relations(
+        "user:alice",
+        time_mode="valid",
+        time_window=(dt("2026-05-01T00:00:00Z"), dt("2026-05-04T00:00:00Z")),
+    )
+
+    assert early_window and early_window[0].attrs == {"cadence": "weekly", "scope": "engram"}
+    assert full_window and full_window[0].attrs == {"cadence": "daily", "scope": "engram"}
 
     mem.close()
 
@@ -742,6 +807,32 @@ def test_relation_history_returns_create_update_delete_and_supports_filters(tmp_
     assert [entry.action for entry in history] == ["create", "update", "delete"]
     assert all(entry.direction == "outgoing" for entry in history)
     assert len(filtered) == 3
+
+    mem.close()
+
+
+def test_relation_history_returns_incoming_direction_for_target_entity(tmp_path):
+    mem = Engram(user_id="alice", path=str(tmp_path))
+    _append_people(mem)
+    mem.append(
+        "relation.create",
+        {
+            "source": "user:alice",
+            "target": "user:bob",
+            "type": "manager",
+            "attrs": {"scope": "engram"},
+        },
+        observed_at=dt("2026-05-01T10:00:00Z"),
+        effective_at_start=dt("2026-05-01T00:00:00Z"),
+        source_role="manual",
+        time_confidence="exact",
+    )
+
+    history = mem.relation_history("user:bob")
+
+    assert len(history) == 1
+    assert history[0].direction == "incoming"
+    assert history[0].other_entity_id == "user:alice"
 
     mem.close()
 

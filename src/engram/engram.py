@@ -255,7 +255,7 @@ class Engram:
                 start = ensure_utc(time_window[0], "time_window[0]")
                 end = ensure_utc(time_window[1], "time_window[1]")
                 if start >= end:
-                    return []
+                    raise ValidationError("time_window[0] must be before time_window[1] for valid relation reads")
                 return self.store.relation_edges_valid_in_window(entity_id, start, end)
             target = utcnow() if at is None else ensure_utc(at, "at")
             return self.store.relation_edges_valid_at(entity_id, target)
