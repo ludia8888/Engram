@@ -355,25 +355,7 @@ class EventStore:
         return [self._row_to_event(row) for row in rows]
 
     def entity_events_known_current(self, entity_id: str) -> list[Event]:
-        rows = self.conn.execute(
-            """
-            SELECT DISTINCT e.*
-            FROM events e
-            JOIN event_entities ee ON ee.event_id = e.id
-            LEFT JOIN extraction_runs r ON r.id = e.extraction_run_id
-            WHERE ee.entity_id = ?
-              AND (
-                e.extraction_run_id IS NULL
-                OR (
-                    r.status = 'SUCCEEDED'
-                    AND r.superseded_at IS NULL
-                )
-              )
-            ORDER BY e.recorded_at ASC, e.seq ASC
-            """,
-            (entity_id,),
-        ).fetchall()
-        return [self._row_to_event(row) for row in rows]
+        return self.entity_events_valid_visible(entity_id)
 
     def entity_events(self, entity_id: str) -> list[Event]:
         rows = self.conn.execute(

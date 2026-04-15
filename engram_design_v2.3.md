@@ -1215,6 +1215,7 @@ def append(turn: RawTurn) -> TurnAck:
 
 - 정렬 기준: `recorded_at`, `seq`
 - run visibility 기준: `known-time visible run`
+- 현재 시각에서 호출하면 이미 supersede된 run의 이벤트는 포함되지 않는다.
 - backfill/reprocess 후에도 과거의 "지식 상태"는 바뀌지 않아야 한다
 
 ### 14.2 valid_history
