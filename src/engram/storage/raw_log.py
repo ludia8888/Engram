@@ -4,6 +4,8 @@ import gzip
 import json
 import os
 import threading
+from collections import defaultdict
+from collections.abc import Iterator
 from pathlib import Path
 
 from engram.time_utils import from_rfc3339, to_rfc3339, utcnow
@@ -26,6 +28,9 @@ class SegmentedRawLog:
                     "last_rotation_at": to_rfc3339(utcnow()),
                 }
             )
+        self._index: dict[str, RawTurn] | None = None
+        self._all_turn_ids: list[str] | None = None
+        self._session_index: dict[str | None, list[str]] | None = None
 
     def append(self, turn: RawTurn) -> TurnAck:
         with self._lock:
@@ -46,6 +51,10 @@ class SegmentedRawLog:
             durable_at = utcnow()
             manifest["last_committed_turn_id"] = turn.id
             self._write_manifest(manifest)
+            if self._index is not None:
+                self._index[turn.id] = turn
+                self._all_turn_ids.append(turn.id)
+                self._session_index.setdefault(turn.session_id, []).append(turn.id)
             return TurnAck(
                 turn_id=turn.id,
                 observed_at=turn.observed_at,
@@ -54,21 +63,21 @@ class SegmentedRawLog:
             )
 
     def raw_get(self, turn_id: str) -> RawTurn | None:
-        for turn in self._iter_turns():
-            if turn.id == turn_id:
-                return turn
-        return None
+        self._ensure_index()
+        return self._index.get(turn_id)
 
     def raw_recent(self, limit: int = 20) -> list[RawTurn]:
-        turns = list(self._iter_turns())
-        return list(reversed(turns[-limit:]))
+        self._ensure_index()
+        ids = self._all_turn_ids[-limit:]
+        return [self._index[tid] for tid in reversed(ids)]
 
     def raw_recent_for_session(self, session_id: str, limit: int = 20) -> list[RawTurn]:
-        turns = [turn for turn in self._iter_turns() if turn.session_id == session_id]
-        return list(reversed(turns[-limit:]))
+        self._ensure_index()
+        ids = self._session_index.get(session_id, [])[-limit:]
+        return [self._index[tid] for tid in reversed(ids)]
 
-    def raw_all(self) -> list[RawTurn]:
-        return list(self._iter_turns())
+    def raw_all(self) -> Iterator[RawTurn]:
+        return self._iter_turns()
 
     def raw_range(
         self,
@@ -76,24 +85,38 @@ class SegmentedRawLog:
         from_turn_id: str | None = None,
         to_turn_id: str | None = None,
     ) -> list[RawTurn]:
-        turns = list(self._iter_turns())
-        turn_ids = [turn.id for turn in turns]
+        self._ensure_index()
+        all_ids = self._all_turn_ids
         start_index = 0
-        end_index = len(turns) - 1
+        end_index = len(all_ids) - 1
 
         if from_turn_id is not None:
-            if from_turn_id not in turn_ids:
+            if from_turn_id not in self._index:
                 raise KeyError(from_turn_id)
-            start_index = turn_ids.index(from_turn_id)
+            start_index = all_ids.index(from_turn_id)
         if to_turn_id is not None:
-            if to_turn_id not in turn_ids:
+            if to_turn_id not in self._index:
                 raise KeyError(to_turn_id)
-            end_index = turn_ids.index(to_turn_id)
+            end_index = all_ids.index(to_turn_id)
 
         if start_index > end_index:
             raise ValueError("from_turn_id_after_to_turn_id")
 
-        return turns[start_index : end_index + 1]
+        return [self._index[tid] for tid in all_ids[start_index : end_index + 1]]
+
+    def _ensure_index(self) -> None:
+        if self._index is not None:
+            return
+        index: dict[str, RawTurn] = {}
+        all_ids: list[str] = []
+        session_index: dict[str | None, list[str]] = defaultdict(list)
+        for turn in self._iter_turns():
+            index[turn.id] = turn
+            all_ids.append(turn.id)
+            session_index[turn.session_id].append(turn.id)
+        self._index = index
+        self._all_turn_ids = all_ids
+        self._session_index = dict(session_index)
 
     def _iter_turns(self):
         manifest = self._load_manifest()

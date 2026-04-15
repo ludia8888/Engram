@@ -575,11 +575,11 @@ class Engram:
 
     def flush(
         self,
-        level: Literal["raw", "canonical", "projection", "index"] = "projection",
+        level: Literal["raw", "canonical", "projection", "index", "all"] = "projection",
     ) -> None:
         if level == "raw":
             return
-        if level == "canonical":
+        elif level == "canonical":
             while True:
                 try:
                     item = self.queue.get_nowait()
@@ -589,13 +589,16 @@ class Engram:
                     self.canonical_worker.process(item)
                 finally:
                     self.queue.task_done()
-        if level == "projection":
+        elif level == "projection":
             self.rebuild_projection(mode="dirty")
-            return
-        if level == "index":
+        elif level == "index":
             self.semantic_indexer.index_missing()
-            return
-        raise ValidationError(f"unsupported flush level: {level}")
+        elif level == "all":
+            self.flush("canonical")
+            self.flush("projection")
+            self.flush("index")
+        else:
+            raise ValidationError(f"unsupported flush level: {level}")
 
     def _get_known_relations_at(self, entity_id: str, at) -> list[RelationEdge]:
         target = ensure_utc(at, "at")

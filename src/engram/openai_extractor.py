@@ -228,13 +228,14 @@ def _parse_extracted_events(content: str, *, safe_user_id: str) -> list[Extracte
     if not isinstance(raw_events, list):
         raise ValidationError("OpenAIExtractor JSON must contain an 'events' array")
 
+    entity_id_map = _build_entity_id_map(raw_events, safe_user_id=safe_user_id)
     parsed: list[ExtractedEvent] = []
     for index, raw_event in enumerate(raw_events):
-        parsed.append(_parse_event(raw_event, safe_user_id=safe_user_id, index=index))
+        parsed.append(_parse_event(raw_event, safe_user_id=safe_user_id, index=index, entity_id_map=entity_id_map))
     return parsed
 
 
-def _parse_event(raw_event: Any, *, safe_user_id: str, index: int) -> ExtractedEvent:
+def _parse_event(raw_event: Any, *, safe_user_id: str, index: int, entity_id_map: dict[str, str] | None = None) -> ExtractedEvent:
     if not isinstance(raw_event, dict):
         raise ValidationError(f"event[{index}] must be an object")
     allowed_keys = {"type", "data", "confidence", "reason"}
@@ -258,7 +259,7 @@ def _parse_event(raw_event: Any, *, safe_user_id: str, index: int) -> ExtractedE
     if not isinstance(reason, str) or not reason.strip():
         raise ValidationError(f"event[{index}].reason must be a non-empty string")
 
-    normalized_data = _normalize_event_data(event_type.strip(), data, safe_user_id=safe_user_id)
+    normalized_data = _normalize_event_data(event_type.strip(), data, safe_user_id=safe_user_id, entity_id_map=entity_id_map)
     validate_event(event_type.strip(), normalized_data)
     return ExtractedEvent(
         type=event_type.strip(),
@@ -273,7 +274,7 @@ def _parse_event(raw_event: Any, *, safe_user_id: str, index: int) -> ExtractedE
     )
 
 
-def _normalize_event_data(event_type: str, data: dict[str, Any], *, safe_user_id: str) -> dict[str, Any]:
+def _normalize_event_data(event_type: str, data: dict[str, Any], *, safe_user_id: str, entity_id_map: dict[str, str] | None = None) -> dict[str, Any]:
     if event_type == "entity.create":
         raw_id = _require_string(data, "id")
         entity_type = _require_string(data, "type").strip().lower()
@@ -294,15 +295,15 @@ def _normalize_event_data(event_type: str, data: dict[str, Any], *, safe_user_id
         return {"id": normalized_id}
 
     if event_type in {"relation.create", "relation.update"}:
-        source = _normalize_relation_endpoint(_require_string(data, "source"), safe_user_id=safe_user_id)
-        target = _normalize_relation_endpoint(_require_string(data, "target"), safe_user_id=safe_user_id)
+        source = _normalize_relation_endpoint(_require_string(data, "source"), safe_user_id=safe_user_id, entity_id_map=entity_id_map)
+        target = _normalize_relation_endpoint(_require_string(data, "target"), safe_user_id=safe_user_id, entity_id_map=entity_id_map)
         relation_type = _require_string(data, "type").strip()
         attrs = _require_object(data, "attrs")
         return {"source": source, "target": target, "type": relation_type, "attrs": attrs}
 
     if event_type == "relation.delete":
-        source = _normalize_relation_endpoint(_require_string(data, "source"), safe_user_id=safe_user_id)
-        target = _normalize_relation_endpoint(_require_string(data, "target"), safe_user_id=safe_user_id)
+        source = _normalize_relation_endpoint(_require_string(data, "source"), safe_user_id=safe_user_id, entity_id_map=entity_id_map)
+        target = _normalize_relation_endpoint(_require_string(data, "target"), safe_user_id=safe_user_id, entity_id_map=entity_id_map)
         relation_type = _require_string(data, "type").strip()
         return {"source": source, "target": target, "type": relation_type}
 
@@ -315,6 +316,12 @@ def _normalize_event_batch(events: list[ExtractedEvent]) -> list[ExtractedEvent]
     relation_update_indexes: dict[tuple[str, str, str], int] = {}
 
     for event in events:
+        if event.type == "entity.create":
+            entity_id = event.data["id"]
+            entity_update_indexes[entity_id] = len(normalized)
+            normalized.append(event)
+            continue
+
         if event.type == "entity.update":
             attrs = dict(event.data["attrs"])
             if not attrs:
@@ -382,7 +389,7 @@ def _normalize_entity_id(
     return f"entity:{slug}", False
 
 
-def _normalize_relation_endpoint(raw_id: str, *, safe_user_id: str) -> str:
+def _normalize_relation_endpoint(raw_id: str, *, safe_user_id: str, entity_id_map: dict[str, str] | None = None) -> str:
     candidate = raw_id.strip()
     if not candidate:
         raise ValidationError("relation endpoint must not be empty")
@@ -393,7 +400,9 @@ def _normalize_relation_endpoint(raw_id: str, *, safe_user_id: str) -> str:
     slug = _slugify(candidate)
     if not slug:
         raise ValidationError("relation endpoint must not normalize to empty")
-    return f"person:{slug}"
+    if entity_id_map and slug in entity_id_map:
+        return entity_id_map[slug]
+    return f"entity:{slug}"
 
 
 def _is_self_reference(value: str, *, safe_user_id: str) -> bool:
@@ -441,6 +450,35 @@ def _is_slug_char(char: str) -> bool:
         or 0xA960 <= codepoint <= 0xA97F
         or 0xD7B0 <= codepoint <= 0xD7FF
     )
+
+
+def _build_entity_id_map(raw_events: list, *, safe_user_id: str) -> dict[str, str]:
+    mapping: dict[str, str] = {}
+    for raw_event in raw_events:
+        if not isinstance(raw_event, dict):
+            continue
+        event_type = raw_event.get("type", "")
+        if not isinstance(event_type, str) or not event_type.startswith("entity."):
+            continue
+        data = raw_event.get("data")
+        if not isinstance(data, dict):
+            continue
+        raw_id = data.get("id")
+        if not isinstance(raw_id, str) or not raw_id.strip():
+            continue
+        candidate = raw_id.strip()
+        if _is_self_reference(candidate, safe_user_id=safe_user_id) or ":" in candidate:
+            continue
+        slug = _slugify(candidate)
+        if not slug:
+            continue
+        entity_type = data.get("type")
+        entity_type_str = entity_type.strip().lower() if isinstance(entity_type, str) else None
+        if entity_type_str in {"user", "person"}:
+            mapping[slug] = f"person:{slug}"
+        else:
+            mapping[slug] = f"entity:{slug}"
+    return mapping
 
 
 def _require_string(data: dict[str, Any], key: str) -> str:

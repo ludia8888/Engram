@@ -54,3 +54,31 @@ def test_flush_canonical_with_default_extractor_does_not_create_events(tmp_path)
     assert dict(mem.projector.current_snapshot()) == {}
 
     mem.close()
+
+
+def test_flush_all_runs_canonical_projection_and_index_in_sequence(tmp_path):
+    mem = Engram(user_id="alice", path=str(tmp_path))
+    mem.append(
+        "entity.create",
+        {"id": "user:alice", "type": "user", "attrs": {"diet": "vegetarian"}},
+        observed_at=dt("2026-05-01T10:00:00Z"),
+    )
+    mem.turn(
+        user="나는 부산에 살아",
+        assistant="알겠어.",
+        observed_at=dt("2026-05-01T11:00:00Z"),
+    )
+
+    assert mem.store.count_dirty_ranges() == 1
+    assert mem.queue.qsize() == 1
+
+    mem.flush("all")
+
+    assert mem.queue.qsize() == 0
+    assert mem.store.count_dirty_ranges() == 0
+    assert mem.store.count_extraction_runs() == 1
+    snapshot = mem.projector.current_snapshot()
+    assert "user:alice" in snapshot
+    assert mem.store.count_vec_events() >= 1
+
+    mem.close()
