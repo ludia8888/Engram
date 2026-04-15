@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gzip
 import json
 import os
 import threading
@@ -65,6 +66,31 @@ class SegmentedRawLog:
     def raw_all(self) -> list[RawTurn]:
         return list(self._iter_turns())
 
+    def raw_range(
+        self,
+        *,
+        from_turn_id: str | None = None,
+        to_turn_id: str | None = None,
+    ) -> list[RawTurn]:
+        turns = list(self._iter_turns())
+        turn_ids = [turn.id for turn in turns]
+        start_index = 0
+        end_index = len(turns) - 1
+
+        if from_turn_id is not None:
+            if from_turn_id not in turn_ids:
+                raise KeyError(from_turn_id)
+            start_index = turn_ids.index(from_turn_id)
+        if to_turn_id is not None:
+            if to_turn_id not in turn_ids:
+                raise KeyError(to_turn_id)
+            end_index = turn_ids.index(to_turn_id)
+
+        if start_index > end_index:
+            raise ValueError("from_turn_id_after_to_turn_id")
+
+        return turns[start_index : end_index + 1]
+
     def _iter_turns(self):
         manifest = self._load_manifest()
         active = self.root / manifest["active_segment"]
@@ -73,8 +99,10 @@ class SegmentedRawLog:
             paths.append(active)
         for path in paths:
             if path.suffix == ".gz":
-                continue
-            with path.open("r", encoding="utf-8") as handle:
+                handle = gzip.open(path, "rt", encoding="utf-8")
+            else:
+                handle = path.open("r", encoding="utf-8")
+            with handle:
                 for line in handle:
                     if not line.strip():
                         continue

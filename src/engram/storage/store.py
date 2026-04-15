@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, TypeAlias
 
-from engram.time_utils import from_rfc3339, to_rfc3339
+from engram.time_utils import from_rfc3339, to_rfc3339, utcnow
 from engram.types import Entity, Event, ExtractionRun
 
 DirtyRangeRow: TypeAlias = tuple[str, str, str, str | None, str, str]
@@ -181,6 +181,7 @@ class EventStore:
             FROM extraction_runs
             WHERE status = 'SUCCEEDED'
               AND extractor_version = ?
+              AND superseded_at IS NULL
             """
             ,
             (extractor_version,),
@@ -195,11 +196,87 @@ class EventStore:
             WHERE source_turn_id = ?
               AND extractor_version = ?
               AND status = 'SUCCEEDED'
+              AND superseded_at IS NULL
             LIMIT 1
             """,
             (source_turn_id, extractor_version),
         ).fetchone()
         return row is not None
+
+    def active_successful_runs_for_turn(self, source_turn_id: str) -> list[ExtractionRun]:
+        rows = self.conn.execute(
+            """
+            SELECT *
+            FROM extraction_runs
+            WHERE source_turn_id = ?
+              AND status = 'SUCCEEDED'
+              AND superseded_at IS NULL
+            ORDER BY processed_at ASC, id ASC
+            """,
+            (source_turn_id,),
+        ).fetchall()
+        return [self._row_to_run(row) for row in rows]
+
+    def supersede_runs(
+        self,
+        tx: sqlite3.Connection,
+        *,
+        old_run_ids: list[str],
+        new_run_id: str,
+        superseded_at: str,
+    ) -> None:
+        if not old_run_ids:
+            return
+        placeholders = ",".join("?" for _ in old_run_ids)
+        tx.execute(
+            f"""
+            UPDATE extraction_runs
+            SET superseded_at = ?
+            WHERE id IN ({placeholders})
+              AND superseded_at IS NULL
+            """,
+            [superseded_at, *old_run_ids],
+        )
+        tx.executemany(
+            """
+            INSERT INTO superseded_runs(old_run_id, new_run_id, superseded_at)
+            VALUES (?, ?, ?)
+            """,
+            [(old_run_id, new_run_id, superseded_at) for old_run_id in old_run_ids],
+        )
+
+    def list_superseded_runs(self) -> list[dict[str, str]]:
+        rows = self.conn.execute(
+            """
+            SELECT old_run_id, new_run_id, superseded_at
+            FROM superseded_runs
+            ORDER BY superseded_at ASC, old_run_id ASC
+            """
+        ).fetchall()
+        return [
+            {
+                "old_run_id": str(row["old_run_id"]),
+                "new_run_id": str(row["new_run_id"]),
+                "superseded_at": str(row["superseded_at"]),
+            }
+            for row in rows
+        ]
+
+    def entity_owner_ids_for_runs(self, run_ids: list[str]) -> list[str]:
+        if not run_ids:
+            return []
+        placeholders = ",".join("?" for _ in run_ids)
+        rows = self.conn.execute(
+            f"""
+            SELECT DISTINCT ee.entity_id
+            FROM event_entities ee
+            JOIN events e ON e.id = ee.event_id
+            WHERE e.extraction_run_id IN ({placeholders})
+            ORDER BY ee.entity_id ASC
+            """,
+            run_ids,
+        ).fetchall()
+        return [str(row[0]) for row in rows]
 
     def append_extraction_run(self, tx: sqlite3.Connection, run: ExtractionRun) -> None:
         tx.execute(
@@ -231,33 +308,70 @@ class EventStore:
             ORDER BY processed_at ASC, id ASC
             """
         ).fetchall()
-        return [
-            ExtractionRun(
-                id=row["id"],
-                source_turn_id=row["source_turn_id"],
-                extractor_version=row["extractor_version"],
-                observed_at=from_rfc3339(row["observed_at"]),
-                processed_at=from_rfc3339(row["processed_at"]),
-                status=row["status"],
-                error=row["error"],
-                event_count=int(row["event_count"]),
-                superseded_at=from_rfc3339(row["superseded_at"]) if row["superseded_at"] else None,
-                projection_version=int(row["projection_version"]) if row["projection_version"] is not None else None,
-            )
-            for row in rows
-        ]
+        return [self._row_to_run(row) for row in rows]
 
-    def entity_events_visible_at(self, entity_id: str, recorded_at: str) -> list[Event]:
+    def entity_events_known_visible_at(self, entity_id: str, recorded_at: str) -> list[Event]:
         rows = self.conn.execute(
             """
             SELECT DISTINCT e.*
             FROM events e
             JOIN event_entities ee ON ee.event_id = e.id
+            LEFT JOIN extraction_runs r ON r.id = e.extraction_run_id
             WHERE ee.entity_id = ?
               AND e.recorded_at <= ?
+              AND (
+                e.extraction_run_id IS NULL
+                OR (
+                    r.status = 'SUCCEEDED'
+                    AND r.processed_at <= ?
+                    AND (r.superseded_at IS NULL OR r.superseded_at > ?)
+                )
+              )
             ORDER BY e.recorded_at ASC, e.seq ASC
             """,
-            (entity_id, recorded_at),
+            (entity_id, recorded_at, recorded_at, recorded_at),
+        ).fetchall()
+        return [self._row_to_event(row) for row in rows]
+
+    def entity_events_valid_visible(self, entity_id: str) -> list[Event]:
+        rows = self.conn.execute(
+            """
+            SELECT DISTINCT e.*
+            FROM events e
+            JOIN event_entities ee ON ee.event_id = e.id
+            LEFT JOIN extraction_runs r ON r.id = e.extraction_run_id
+            WHERE ee.entity_id = ?
+              AND (
+                e.extraction_run_id IS NULL
+                OR (
+                    r.status = 'SUCCEEDED'
+                    AND r.superseded_at IS NULL
+                )
+              )
+            ORDER BY e.recorded_at ASC, e.seq ASC
+            """,
+            (entity_id,),
+        ).fetchall()
+        return [self._row_to_event(row) for row in rows]
+
+    def entity_events_known_current(self, entity_id: str) -> list[Event]:
+        rows = self.conn.execute(
+            """
+            SELECT DISTINCT e.*
+            FROM events e
+            JOIN event_entities ee ON ee.event_id = e.id
+            LEFT JOIN extraction_runs r ON r.id = e.extraction_run_id
+            WHERE ee.entity_id = ?
+              AND (
+                e.extraction_run_id IS NULL
+                OR (
+                    r.status = 'SUCCEEDED'
+                    AND r.superseded_at IS NULL
+                )
+              )
+            ORDER BY e.recorded_at ASC, e.seq ASC
+            """,
+            (entity_id,),
         ).fetchall()
         return [self._row_to_event(row) for row in rows]
 
@@ -274,28 +388,64 @@ class EventStore:
         ).fetchall()
         return [self._row_to_event(row) for row in rows]
 
-    def visible_events(self, recorded_at: str, from_recorded_at: str | None = None) -> list[Event]:
+    def visible_events_known(self, recorded_at: str, from_recorded_at: str | None = None) -> list[Event]:
         if from_recorded_at is None:
             rows = self.conn.execute(
                 """
-                SELECT *
+                SELECT events.*
                 FROM events
-                WHERE recorded_at <= ?
-                ORDER BY recorded_at ASC, seq ASC
+                LEFT JOIN extraction_runs r ON r.id = events.extraction_run_id
+                WHERE events.recorded_at <= ?
+                  AND (
+                    events.extraction_run_id IS NULL
+                    OR (
+                        r.status = 'SUCCEEDED'
+                        AND r.processed_at <= ?
+                        AND (r.superseded_at IS NULL OR r.superseded_at > ?)
+                    )
+                  )
+                ORDER BY events.recorded_at ASC, events.seq ASC
                 """,
-                (recorded_at,),
+                (recorded_at, recorded_at, recorded_at),
             ).fetchall()
         else:
             rows = self.conn.execute(
                 """
-                SELECT *
+                SELECT events.*
                 FROM events
-                WHERE recorded_at >= ?
-                  AND recorded_at <= ?
-                ORDER BY recorded_at ASC, seq ASC
+                LEFT JOIN extraction_runs r ON r.id = events.extraction_run_id
+                WHERE events.recorded_at >= ?
+                  AND events.recorded_at <= ?
+                  AND (
+                    events.extraction_run_id IS NULL
+                    OR (
+                        r.status = 'SUCCEEDED'
+                        AND r.processed_at <= ?
+                        AND (r.superseded_at IS NULL OR r.superseded_at > ?)
+                    )
+                  )
+                ORDER BY events.recorded_at ASC, events.seq ASC
                 """,
-                (from_recorded_at, recorded_at),
+                (from_recorded_at, recorded_at, recorded_at, recorded_at),
             ).fetchall()
+        return [self._row_to_event(row) for row in rows]
+
+    def visible_events_valid(self) -> list[Event]:
+        rows = self.conn.execute(
+            """
+            SELECT events.*
+            FROM events
+            LEFT JOIN extraction_runs r ON r.id = events.extraction_run_id
+            WHERE (
+                events.extraction_run_id IS NULL
+                OR (
+                    r.status = 'SUCCEEDED'
+                    AND r.superseded_at IS NULL
+                )
+            )
+            ORDER BY events.recorded_at ASC, events.seq ASC
+            """
+        ).fetchall()
         return [self._row_to_event(row) for row in rows]
 
     def event_entity_ids_for_events(self, event_ids: list[str]) -> dict[str, list[str]]:
@@ -332,7 +482,7 @@ class EventStore:
         return [self._row_to_event(row) for row in rows]
 
     def materialize_current_entity(self, entity_id: str) -> Entity | None:
-        folded = self.fold_entity_events(entity_id, self.entity_events(entity_id))
+        folded = self.fold_entity_events(entity_id, self.entity_events_known_current(entity_id))
         if folded is None:
             return None
         return Entity(
@@ -386,11 +536,14 @@ class EventStore:
             active=active,
         )
 
-    def fold_entity_events_valid_at(self, entity_id: str, at: datetime) -> FoldedValidEntityState | None:
-        events = sorted(
-            self.entity_events(entity_id),
-            key=valid_event_sort_key,
-        )
+    def fold_entity_events_valid_at(
+        self,
+        entity_id: str,
+        at: datetime,
+        *,
+        events: list[Event] | None = None,
+    ) -> FoldedValidEntityState | None:
+        events = sorted(events if events is not None else self.entity_events_valid_visible(entity_id), key=valid_event_sort_key)
         entity_type = "unknown"
         attrs: dict[str, Any] = {}
         unknown_attrs: list[str] = []
@@ -451,6 +604,20 @@ class EventStore:
             time_confidence=row["time_confidence"],
             caused_by=row["caused_by"],
             schema_version=int(row["schema_version"]),
+        )
+
+    def _row_to_run(self, row: sqlite3.Row) -> ExtractionRun:
+        return ExtractionRun(
+            id=row["id"],
+            source_turn_id=row["source_turn_id"],
+            extractor_version=row["extractor_version"],
+            observed_at=from_rfc3339(row["observed_at"]),
+            processed_at=from_rfc3339(row["processed_at"]),
+            status=row["status"],
+            error=row["error"],
+            event_count=int(row["event_count"]),
+            superseded_at=from_rfc3339(row["superseded_at"]) if row["superseded_at"] else None,
+            projection_version=int(row["projection_version"]) if row["projection_version"] is not None else None,
         )
 
 

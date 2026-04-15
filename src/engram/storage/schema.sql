@@ -11,9 +11,11 @@ CREATE TABLE IF NOT EXISTS extraction_runs (
     projection_version INTEGER
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS uq_run_dedupe
+DROP INDEX IF EXISTS uq_run_dedupe;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_run_dedupe_active
     ON extraction_runs(source_turn_id, extractor_version)
-    WHERE status = 'SUCCEEDED';
+    WHERE status = 'SUCCEEDED' AND superseded_at IS NULL;
 
 CREATE TABLE IF NOT EXISTS superseded_runs (
     old_run_id      TEXT PRIMARY KEY,
@@ -74,4 +76,3 @@ CREATE TABLE IF NOT EXISTS snapshots (
     state_blob                 BLOB NOT NULL,
     relation_blob              BLOB NOT NULL
 );
-

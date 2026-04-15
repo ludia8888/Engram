@@ -70,7 +70,7 @@ class RetrievalEngine:
 
         upper_bound = time_window[1] if time_window else utcnow()
         lower_bound = time_window[0] if time_window else None
-        events = self.store.visible_events(
+        events = self.store.visible_events_known(
             to_rfc3339(upper_bound),
             from_recorded_at=to_rfc3339(lower_bound) if lower_bound else None,
         )
@@ -131,14 +131,14 @@ class RetrievalEngine:
             as_of = utcnow()
             events = [
                 event
-                for event in self.store.visible_events(to_rfc3339(as_of))
+                for event in self.store.visible_events_valid()
                 if covers_valid_time(event, as_of)
             ]
         else:
             start_at, end_at = time_window
             events = [
                 event
-                for event in self.store.visible_events(to_rfc3339(utcnow()))
+                for event in self.store.visible_events_valid()
                 if overlaps_valid_time_window(event, start_at, end_at)
             ]
 

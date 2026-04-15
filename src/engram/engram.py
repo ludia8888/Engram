@@ -154,7 +154,7 @@ class Engram:
 
     def get(self, entity_id: str) -> Entity | None:
         now = utcnow()
-        events = self.store.entity_events_visible_at(entity_id, to_rfc3339(now))
+        events = self.store.entity_events_known_visible_at(entity_id, to_rfc3339(now))
         folded = self.store.fold_entity_events(entity_id, events)
         if folded is None:
             return None
@@ -168,7 +168,7 @@ class Engram:
 
     def get_known_at(self, entity_id: str, at) -> TemporalEntityView | None:
         target = ensure_utc(at, "at")
-        events = self.store.entity_events_visible_at(entity_id, to_rfc3339(target))
+        events = self.store.entity_events_known_visible_at(entity_id, to_rfc3339(target))
         folded = self.store.fold_entity_events(entity_id, events)
         if folded is None:
             return None
@@ -184,7 +184,11 @@ class Engram:
 
     def get_valid_at(self, entity_id: str, at) -> TemporalEntityView | None:
         target = ensure_utc(at, "at")
-        folded = self.store.fold_entity_events_valid_at(entity_id, target)
+        folded = self.store.fold_entity_events_valid_at(
+            entity_id,
+            target,
+            events=self.store.entity_events_valid_visible(entity_id),
+        )
         if folded is None:
             return None
         return TemporalEntityView(
@@ -201,7 +205,7 @@ class Engram:
         return self._build_history(
             entity_id=entity_id,
             attr=attr,
-            events=self.store.entity_events(entity_id),
+            events=self.store.entity_events_known_visible_at(entity_id, to_rfc3339(utcnow())),
             basis="known",
             skip_unknown_effective=False,
         )
@@ -210,10 +214,36 @@ class Engram:
         return self._build_history(
             entity_id=entity_id,
             attr=attr,
-            events=sorted(self.store.entity_events(entity_id), key=valid_event_sort_key),
+            events=sorted(self.store.entity_events_valid_visible(entity_id), key=valid_event_sort_key),
             basis="valid",
             skip_unknown_effective=True,
         )
+
+    def reprocess(
+        self,
+        *,
+        from_turn_id: str | None = None,
+        to_turn_id: str | None = None,
+        extractor_version: str | None = None,
+    ) -> int:
+        if extractor_version is not None and extractor_version != self.extractor.version:
+            raise ValidationError(
+                f"extractor_version must match current extractor version {self.extractor.version}"
+            )
+        try:
+            turns = self.raw_log.raw_range(from_turn_id=from_turn_id, to_turn_id=to_turn_id)
+        except KeyError as exc:
+            raise ValidationError(f"turn_id not found: {exc.args[0]}") from exc
+        except ValueError as exc:
+            if str(exc) == "from_turn_id_after_to_turn_id":
+                raise ValidationError(f"from_turn_id {from_turn_id} is after to_turn_id {to_turn_id}") from exc
+            raise
+
+        count = 0
+        for turn in turns:
+            self.canonical_worker.process(QueueItem.from_turn(turn), force=True)
+            count += 1
+        return count
 
     def _build_history(
         self,
