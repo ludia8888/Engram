@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, TypeAlias
 
+from engram.semantic import embedding_from_blob
 from engram.time_utils import from_rfc3339, to_rfc3339, utcnow
 from engram.types import Entity, Event, ExtractionRun
 
@@ -138,6 +139,16 @@ class EventStore:
         row = self.conn.execute("SELECT COUNT(*) FROM dirty_ranges").fetchone()
         return int(row[0])
 
+    def count_vec_events(self, embedder_version: str | None = None) -> int:
+        if embedder_version is None:
+            row = self.conn.execute("SELECT COUNT(*) FROM vec_events").fetchone()
+        else:
+            row = self.conn.execute(
+                "SELECT COUNT(*) FROM vec_events WHERE embedder_version = ?",
+                (embedder_version,),
+            ).fetchone()
+        return int(row[0])
+
     def dirty_owner_ids(self) -> list[str]:
         rows = self.conn.execute(
             """
@@ -173,6 +184,40 @@ class EventStore:
             """
         ).fetchall()
         return [str(row[0]) for row in rows]
+
+    def events_missing_embeddings(self, embedder_version: str) -> list[Event]:
+        rows = self.conn.execute(
+            """
+            SELECT e.*
+            FROM events e
+            LEFT JOIN vec_events v
+              ON v.event_id = e.id
+             AND v.embedder_version = ?
+            WHERE v.event_id IS NULL
+            ORDER BY e.seq ASC
+            """,
+            (embedder_version,),
+        ).fetchall()
+        return [self._row_to_event(row) for row in rows]
+
+    def missing_event_embedding_ids(self, embedder_version: str) -> list[str]:
+        return [event.id for event in self.events_missing_embeddings(embedder_version)]
+
+    def append_event_embeddings(
+        self,
+        tx: sqlite3.Connection,
+        rows: list[tuple[str, str, int, bytes, str]],
+    ) -> None:
+        if not rows:
+            return
+        tx.executemany(
+            """
+            INSERT OR REPLACE INTO vec_events(
+                event_id, embedder_version, dim, embedding, indexed_at
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            rows,
+        )
 
     def successful_source_turn_ids(self, extractor_version: str) -> set[str]:
         rows = self.conn.execute(
@@ -462,6 +507,30 @@ class EventStore:
             event_ids,
         ).fetchall()
         return [self._row_to_event(row) for row in rows]
+
+    def event_embeddings_for_ids(
+        self,
+        event_ids: list[str],
+        *,
+        embedder_version: str,
+    ) -> dict[str, list[float]]:
+        if not event_ids:
+            return {}
+        placeholders = ",".join("?" for _ in event_ids)
+        rows = self.conn.execute(
+            f"""
+            SELECT event_id, dim, embedding
+            FROM vec_events
+            WHERE embedder_version = ?
+              AND event_id IN ({placeholders})
+            ORDER BY event_id ASC
+            """,
+            [embedder_version, *event_ids],
+        ).fetchall()
+        return {
+            str(row["event_id"]): embedding_from_blob(row["embedding"], dim=int(row["dim"]))
+            for row in rows
+        }
 
     def materialize_current_entity(self, entity_id: str) -> Entity | None:
         folded = self.fold_entity_events(entity_id, self.entity_events_known_current(entity_id))

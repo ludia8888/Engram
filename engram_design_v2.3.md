@@ -170,7 +170,7 @@ history = mem.known_history("user:alice")
 - 현재 구조화 메모리는 `append()`와 `get_known_at()` 중심으로 검증된다.
 - `flush("projection")`은 이미 커밋된 canonical 이벤트만 내부 projection snapshot에 반영한다.
 - 앱이 다시 시작되면 raw에만 있고 아직 `현재 extractor version` 기준 successful extraction run이 없는 turn은 startup catch-up으로 다시 큐에 올라간다.
-- `search()`와 `context()`는 현재 `known`/`valid` 모드의 최소형이 구현됐고, semantic index 없이 canonical 이벤트를 직접 스캔한다.
+- `search()`와 `context()`는 현재 `known`/`valid` 모드와 pluggable semantic index까지 구현됐고, semantic은 현재 embedder version 기준 `vec_events`를 사용한다.
 
 ### 2.4 로드맵 예시 API
 
@@ -577,14 +577,18 @@ CREATE VIRTUAL TABLE entity_fts USING fts5(
 );
 
 CREATE TABLE vec_events (
-    event_id     TEXT PRIMARY KEY,
-    embedding    BLOB NOT NULL
+    event_id           TEXT NOT NULL,
+    embedder_version   TEXT NOT NULL,
+    dim                INTEGER NOT NULL,
+    embedding          BLOB NOT NULL,
+    indexed_at         TEXT NOT NULL,
+    PRIMARY KEY(event_id, embedder_version)
 );
 ```
 
 주의:
 - `entity_fts`, `vec_events`는 canonical truth가 아니다.
-- projector가 언제든 다시 만들 수 있어야 한다.
+- `vec_events`는 embedder version별로 다시 만들 수 있어야 한다.
 
 ### 6.3 Raw Log 저장 구조
 
@@ -641,16 +645,15 @@ class Engram:
         queue_max_size: int = 10000,
         queue_put_timeout: float = 1.0,
         extractor: Extractor | None = None,
+        embedder: Embedder | None = None,
     ): ...
 ```
 
 현재 구현 메모:
 - extractor를 넘기지 않으면 기본 `NullExtractor`가 사용된다.
 - 즉 `flush("canonical")`은 동작하지만, 기본값으로는 extraction run만 기록하고 event는 만들지 않는다.
-
-향후 Phase 2+에서 추가 예정:
-- embedding 관련 인자
-- retrieval/context 관련 옵션
+- embedder를 넘기지 않으면 기본 `HashEmbedder`가 사용된다.
+- embedder는 `version`, `dim`, `embed_texts(texts)`를 가진 pluggable 인터페이스다.
 
 ### 7.3 Write API
 
@@ -694,7 +697,7 @@ def append(
 
 ### 7.4 Flush API
 
-Status: `Implemented (Phase 2 PR2 for canonical, Phase 2 PR1 for projection)`
+Status: `Implemented (Phase 3 PR2 for index, Phase 2 PR2 for canonical, Phase 2 PR1 for projection)`
 
 ```python
 def flush(
@@ -710,7 +713,8 @@ def flush(
 - extractor가 event를 만들면 `extraction_runs`, `events`, `event_entities`, `dirty_ranges`가 함께 커밋된다.
 - 기본 extractor는 no-op이므로 `flush("canonical")`을 호출해도 event 없이 successful extraction run만 남는다.
 - `flush("projection")`은 `dirty_ranges`를 읽어 projector rebuild를 완료할 때까지 수행한다.
-- `flush("index")`는 아직 `NotImplementedError`다. semantic/entity index가 구현되지 않았기 때문이다.
+- `flush("index")`는 현재 embedder version 기준으로 아직 인덱싱되지 않은 canonical event를 `vec_events`에 backfill한다.
+- embedder version이 바뀌면 이전 vector row는 남겨두고, 검색은 현재 version row만 사용한다.
 - `turn()`만 호출한 raw turn은 `flush("projection")`으로도 canonical/projection에 올라가지 않는다.
 
 ### 7.5 Query API
@@ -746,7 +750,8 @@ Status:
 - `context(..., time_mode="known")` = `Implemented (Phase 3 PR1)`
 - `search(..., time_mode="valid")` = `Implemented (Phase 4 PR2)`
 - `context(..., time_mode="valid")` = `Implemented (Phase 4 PR2)`
-- semantic / causal ranking = `Planned (Phase 3+)`
+- semantic ranking = `Implemented (Phase 3 PR2)`
+- causal ranking = `Planned (Phase 3+)`
 
 ```python
 def search(
@@ -773,12 +778,15 @@ def context(
 ```
 
 현재 구현 규칙:
-- `search()`는 canonical 이벤트를 직접 읽는 event-seeded lexical retrieval이다.
-- 지원 축은 현재 `entity`와 optional `temporal`뿐이다.
-- `semantic`, `causal` 축은 아직 결과 집계에 포함되지 않는다.
+- `search()`는 canonical 이벤트를 직접 읽는 event-seeded retrieval이다.
+- lexical 점수와 semantic cosine 점수를 함께 사용한다.
+- 지원 축은 현재 `entity`, optional `semantic`, optional `temporal`다.
+- `causal` 축은 아직 결과 집계에 포함되지 않는다.
 - `time_mode="known"`는 `recorded_at` 기준 lexical retrieval이다.
 - `time_mode="valid"`는 `effective_at_*` 기준 lexical retrieval이다.
 - `time_mode="valid"`에서는 `effective_at_start`가 없는 이벤트를 seed에서 제외한다.
+- semantic 검색은 현재 embedder version의 `vec_events`만 사용한다.
+- semantic row가 없는 경우에도 검색은 lexical-only로 정상 동작한다.
 - `context()`는 `search()` 결과를 바탕으로 `Memory Basis / Current State / Relevant Changes / Raw Evidence` 섹션을 만든다.
 - `include_raw=True`일 때만 `source_turn_id`를 따라 raw evidence를 붙인다.
 - `context(time_mode="valid")`는 `Current State`에 `unknown_attrs`를 함께 노출한다.
@@ -1000,14 +1008,15 @@ query
 ```
 
 현재 구현된 최소형:
-- semantic index 없이 canonical `events`를 직접 스캔한다.
 - query token과 event `type/data/reason/source_role`의 lexical match로 seed event를 만든다.
+- `flush("index")`로 구축한 `vec_events`를 사용해 current embedder version 기준 semantic cosine score를 계산한다.
 - 한국어 query는 조사/어미가 붙은 일부 어절에 대해 간단한 suffix normalization을 적용한다.
 - seed event를 `event_entities`로 entity 후보에 투영한다.
 - 결과는 entity별 supporting event 집합으로 반환한다.
 - `known` mode의 `time_window`는 `recorded_at` 기준으로만 적용된다.
 - `valid` mode의 `time_window`는 `effective_at_*` overlap 기준으로 적용된다.
 - `valid` mode는 `effective_at_start`가 없는 이벤트를 검색 seed에서 제외하고, 불확실성은 `context()`의 `unknown_attrs`에서 보완한다.
+- semantic row가 없는 이벤트는 lexical-only 후보로 남는다.
 
 ### 10.2 Run visibility 필터
 
@@ -1021,7 +1030,7 @@ query
   - 현재 active run만 사용
   - failed/skipped run 제외
 
-즉 `vec_events`도 단독 조회하지 않고 반드시 `events -> extraction_runs -> superseded_runs`를 조인해 해당 mode의 visibility 규칙을 탄다.
+즉 `vec_events`도 단독 조회하지 않고, 먼저 mode에 맞는 visible event 집합을 만든 뒤 그 event id에 대해서만 semantic score를 계산한다.
 
 ### 10.3 Time Mode
 
@@ -1040,16 +1049,14 @@ query
 스코어는 단일 축이 아니라 합성이다.
 
 ```text
-score = entity_score
-      + semantic_score
-      + temporal_score
-      + causal_score
-      + freshness_bonus_or_penalty
+event_score = lexical_score only
+          or 0.6 * lexical_score + 0.4 * semantic_score
+entity_score = Σ supporting_event_scores
 ```
 
 정규화 원칙:
-- bm25와 vector distance는 raw 수치를 그대로 합치지 않는다
-- 각 축 점수는 0~1로 캘리브레이션한다
+- 현재 semantic은 cosine similarity를 0~1 범위로 clamp하여 사용한다
+- current embedder version의 semantic row가 하나도 없으면 lexical-only 결과를 그대로 사용한다
 - `matched_axes`를 결과에 남겨 디버깅 가능하게 한다
 
 ### 10.5 event_entities의 역할
