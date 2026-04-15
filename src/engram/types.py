@@ -116,6 +116,15 @@ class TemporalEntityView:
 
 
 @dataclass(slots=True)
+class SearchResult:
+    entity_id: str
+    score: float
+    matched_axes: set[Literal["entity", "semantic", "temporal", "causal"]]
+    supporting_event_ids: list[str]
+    time_basis: Literal["known", "valid"]
+
+
+@dataclass(slots=True)
 class HistoryEntry:
     entity_id: str
     attr: str

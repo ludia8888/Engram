@@ -9,6 +9,7 @@ from .types import (
     HistoryEntry,
     QueueItem,
     RawTurn,
+    SearchResult,
     TemporalEntityView,
     TurnAck,
 )
@@ -28,6 +29,7 @@ __all__ = [
     "HistoryEntry",
     "QueueItem",
     "RawTurn",
+    "SearchResult",
     "TemporalEntityView",
     "TurnAck",
 ]

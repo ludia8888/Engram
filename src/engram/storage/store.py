@@ -264,6 +264,63 @@ class EventStore:
         ).fetchall()
         return [self._row_to_event(row) for row in rows]
 
+    def visible_events(self, recorded_at: str, from_recorded_at: str | None = None) -> list[Event]:
+        if from_recorded_at is None:
+            rows = self.conn.execute(
+                """
+                SELECT *
+                FROM events
+                WHERE recorded_at <= ?
+                ORDER BY recorded_at ASC, seq ASC
+                """,
+                (recorded_at,),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                """
+                SELECT *
+                FROM events
+                WHERE recorded_at >= ?
+                  AND recorded_at <= ?
+                ORDER BY recorded_at ASC, seq ASC
+                """,
+                (from_recorded_at, recorded_at),
+            ).fetchall()
+        return [self._row_to_event(row) for row in rows]
+
+    def event_entity_ids_for_events(self, event_ids: list[str]) -> dict[str, list[str]]:
+        if not event_ids:
+            return {}
+        placeholders = ",".join("?" for _ in event_ids)
+        rows = self.conn.execute(
+            f"""
+            SELECT event_id, entity_id
+            FROM event_entities
+            WHERE event_id IN ({placeholders})
+            ORDER BY event_id ASC, entity_id ASC
+            """,
+            event_ids,
+        ).fetchall()
+        mapping: dict[str, list[str]] = {}
+        for row in rows:
+            mapping.setdefault(str(row["event_id"]), []).append(str(row["entity_id"]))
+        return mapping
+
+    def events_by_ids(self, event_ids: list[str]) -> list[Event]:
+        if not event_ids:
+            return []
+        placeholders = ",".join("?" for _ in event_ids)
+        rows = self.conn.execute(
+            f"""
+            SELECT *
+            FROM events
+            WHERE id IN ({placeholders})
+            ORDER BY recorded_at ASC, seq ASC
+            """,
+            event_ids,
+        ).fetchall()
+        return [self._row_to_event(row) for row in rows]
+
     def materialize_current_entity(self, entity_id: str) -> Entity | None:
         folded = self.fold_entity_events(entity_id, self.entity_events(entity_id))
         if folded is None:

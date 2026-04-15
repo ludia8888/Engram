@@ -7,13 +7,15 @@ from typing import Literal
 from uuid import uuid4
 
 from .canonical import CanonicalWorker, Extractor, NullExtractor
+from .context_builder import ContextBuilder
 from .errors import ValidationError
 from .event_ops import derive_dirty_rows, derive_event_entities, validate_event
 from .projector import Projector
 from .recovery import RecoveryService
+from .retrieval import RetrievalEngine
 from .storage import EventStore, SegmentedRawLog, WriterLock, open_connection
 from .time_utils import ensure_utc, to_rfc3339, utcnow
-from .types import Entity, Event, HistoryEntry, QueueItem, RawTurn, TemporalEntityView, TurnAck
+from .types import Entity, Event, HistoryEntry, QueueItem, RawTurn, SearchResult, TemporalEntityView, TurnAck
 
 
 def _safe_user_id(user_id: str) -> str:
@@ -50,6 +52,8 @@ class Engram:
             self.raw_log = SegmentedRawLog(self.root / "raw")
             self.projector = Projector(self.store)
             self.canonical_worker = CanonicalWorker(self.store, self.extractor)
+            self.retrieval = RetrievalEngine(self.store)
+            self.context_builder = ContextBuilder(self.store, self.raw_log.raw_get)
             self.queue: queue.Queue[QueueItem] = queue.Queue(maxsize=queue_max_size)
             self.recovery = RecoveryService(
                 raw_log=self.raw_log,
@@ -218,6 +222,42 @@ class Engram:
 
     def raw_recent(self, limit: int = 20) -> list[RawTurn]:
         return self.raw_log.raw_recent(limit=limit)
+
+    def search(
+        self,
+        query: str,
+        *,
+        time_mode: Literal["known", "valid"] = "known",
+        time_window=None,
+        k: int = 20,
+    ) -> list[SearchResult]:
+        if time_mode != "known":
+            raise ValidationError("valid time_mode is planned but not implemented yet")
+        return self.retrieval.search_known(query, k=k, time_window=time_window)
+
+    def context(
+        self,
+        query: str,
+        *,
+        time_mode: Literal["known", "valid"] = "known",
+        time_window=None,
+        max_tokens: int = 2000,
+        include_history: bool = True,
+        include_raw: bool = False,
+    ) -> str:
+        if time_mode != "known":
+            raise ValidationError("valid time_mode is planned but not implemented yet")
+        as_of = time_window[1] if time_window else utcnow()
+        results = self.search(query, time_mode=time_mode, time_window=time_window, k=5)
+        return self.context_builder.build_known(
+            query=query,
+            results=results,
+            as_of=as_of,
+            max_tokens=max_tokens,
+            include_history=include_history,
+            include_raw=include_raw,
+            get_known_at=self.get_known_at,
+        )
 
     def flush(
         self,

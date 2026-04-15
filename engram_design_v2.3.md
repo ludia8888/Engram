@@ -118,6 +118,8 @@ pip install -e ".[dev]"
 - `get()`
 - `get_known_at()`
 - `known_history()`
+- `search()`
+- `context()`
 - `raw_get()`, `raw_recent()`
 
 주의:
@@ -168,6 +170,7 @@ history = mem.known_history("user:alice")
 - 현재 구조화 메모리는 `append()`와 `get_known_at()` 중심으로 검증된다.
 - `flush("projection")`은 이미 커밋된 canonical 이벤트만 내부 projection snapshot에 반영한다.
 - 앱이 다시 시작되면 raw에만 있고 아직 `현재 extractor version` 기준 successful extraction run이 없는 turn은 startup catch-up으로 다시 큐에 올라간다.
+- `search()`와 `context()`는 현재 `known` 모드만 구현됐고, semantic index 없이 canonical 이벤트를 직접 스캔하는 최소형이다.
 
 ### 2.4 로드맵 예시 API
 
@@ -738,7 +741,11 @@ def valid_history(self, entity_id: str, attr: str | None = None) -> list[History
 
 ### 7.6 Retrieval API
 
-Status: `Planned (Phase 3)`
+Status:
+- `search(..., time_mode="known")` = `Implemented (Phase 3 PR1)`
+- `context(..., time_mode="known")` = `Implemented (Phase 3 PR1)`
+- semantic / causal ranking = `Planned (Phase 3+)`
+- `time_mode="valid"` = `Planned (Phase 4)`
 
 ```python
 def search(
@@ -763,6 +770,14 @@ def context(
 ) -> str:
     ...
 ```
+
+현재 구현 규칙:
+- `search()`는 canonical 이벤트를 직접 읽는 event-seeded lexical retrieval이다.
+- 지원 축은 현재 `entity`와 optional `temporal`뿐이다.
+- `semantic`, `causal` 축은 아직 결과 집계에 포함되지 않는다.
+- `time_mode="valid"`는 아직 `ValidationError`로 거절한다.
+- `context()`는 `search()` 결과를 바탕으로 `Memory Basis / Current State / Relevant Changes / Raw Evidence` 섹션을 만든다.
+- `include_raw=True`일 때만 `source_turn_id`를 따라 raw evidence를 붙인다.
 
 ### 7.7 Maintenance API
 
@@ -972,6 +987,13 @@ query
   -> rank
   -> context build
 ```
+
+현재 구현된 최소형:
+- semantic index 없이 canonical `events`를 직접 스캔한다.
+- query token과 event `type/data/reason/source_role`의 lexical match로 seed event를 만든다.
+- seed event를 `event_entities`로 entity 후보에 투영한다.
+- 결과는 entity별 supporting event 집합으로 반환한다.
+- `known` mode의 `time_window`는 `recorded_at` 기준으로만 적용된다.
 
 ### 10.2 Run visibility 필터
 
