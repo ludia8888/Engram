@@ -20,6 +20,12 @@ class SemanticIndexer:
             raise ValueError(
                 f"embedder returned {len(embeddings)} embeddings for {len(events)} events"
             )
+        if embeddings:
+            embedding_dim = len(embeddings[0])
+            if any(len(embedding) != embedding_dim for embedding in embeddings):
+                raise ValueError("embedder returned inconsistent embedding dimensions")
+        else:
+            embedding_dim = self.embedder.dim
 
         indexed_at = to_rfc3339(utcnow())
         rows: list[tuple[str, str, int, bytes, str]] = []
@@ -28,8 +34,8 @@ class SemanticIndexer:
                 (
                     event.id,
                     self.embedder.version,
-                    self.embedder.dim,
-                    embedding_to_blob(embedding, dim=self.embedder.dim),
+                    embedding_dim,
+                    embedding_to_blob(embedding, dim=embedding_dim),
                     indexed_at,
                 )
             )

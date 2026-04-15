@@ -655,6 +655,9 @@ class Engram:
 - 즉 `flush("canonical")`은 동작하지만, 기본값으로는 extraction run만 기록하고 event는 만들지 않는다.
 - embedder를 넘기지 않으면 기본 `HashEmbedder`가 사용된다.
 - embedder는 `version`, `dim`, `embed_texts(texts)`를 가진 pluggable 인터페이스다.
+- 현재 런타임은 `HashEmbedder` 외에 opt-in `OpenAIEmbedder`도 지원한다.
+- `OpenAIEmbedder`를 쓰려면 optional dependency 설치가 필요하다: `pip install "engram[openai]"`.
+- `OpenAIEmbedder`는 기본적으로 `OPENAI_API_KEY`를 사용하고, 기본 모델은 `text-embedding-3-small`이다.
 
 ### 7.3 Write API
 
@@ -720,6 +723,7 @@ def flush(
 - `flush("projection")`은 `dirty_ranges`를 읽어 projector rebuild를 완료할 때까지 수행한다.
 - `flush("index")`는 현재 embedder version 기준으로 아직 인덱싱되지 않은 canonical event를 `vec_events`에 backfill한다.
 - embedder version이 바뀌면 이전 vector row는 남겨두고, 검색은 현재 version row만 사용한다.
+- `OpenAIEmbedder`를 쓰더라도 `flush("index")`의 의미는 같다. 달라지는 건 현재 version row의 생성 방식뿐이다.
 - `turn()`만 호출한 raw turn은 `flush("projection")`으로도 canonical/projection에 올라가지 않는다.
 
 ### 7.5 Query API
@@ -1100,6 +1104,7 @@ query
 - relation event는 `valid` point query에서는 해당 시점에 active일 때만 seed가 되고, `valid` window query에서는 구간 중 한 번이라도 active였으면 seed가 된다.
 - `valid` mode는 `effective_at_start`가 없는 이벤트를 검색 seed에서 제외하고, 불확실성은 `context()`의 `unknown_attrs`에서 보완한다.
 - semantic row가 없는 이벤트는 lexical-only 후보로 남는다.
+- `OpenAIEmbedder`는 semantic 품질을 높이는 opt-in 선택지지만, 현재 검색 구조 자체를 가속하는 것은 아니다.
 - relation valid-window 검색은 correctness-first 구현이다. 현재는 visible event를 순회하면서 relation key/endpoint overlap을 Python helper로 계산하므로, relation 수가 많거나 window가 넓은 경우 이후 최적화 대상이 될 수 있다.
 - causal expansion은 현재 mode의 visible event 집합 안에서만 수행되고, same-batch alias 해석이나 heuristic causal 추론은 하지 않는다.
 
