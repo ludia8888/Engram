@@ -131,54 +131,30 @@ class Engram:
 
     def get(self, entity_id: str) -> Entity | None:
         now = utcnow()
-        view = self.get_known_at(entity_id, now)
-        if view is None:
+        events = self.store.entity_events_visible_at(entity_id, to_rfc3339(now))
+        folded = self.store.fold_entity_events(entity_id, events)
+        if folded is None:
             return None
-        history = self.store.entity_events_visible_at(entity_id, to_rfc3339(now))
-        created_at = history[0].recorded_at if history else now
-        updated_at = history[-1].recorded_at if history else created_at
         return Entity(
-            id=view.entity_id,
-            type=view.entity_type,
-            attrs=dict(view.attrs),
-            created_recorded_at=created_at,
-            updated_recorded_at=updated_at,
+            id=folded.entity_id,
+            type=folded.entity_type,
+            attrs=dict(folded.attrs),
+            created_recorded_at=folded.created_recorded_at,
+            updated_recorded_at=folded.updated_recorded_at,
         )
 
     def get_known_at(self, entity_id: str, at) -> TemporalEntityView | None:
         target = ensure_utc(at, "at")
         events = self.store.entity_events_visible_at(entity_id, to_rfc3339(target))
-        state = None
-        attrs: dict = {}
-        entity_type = "unknown"
-        supporting_event_ids: list[str] = []
-        deleted = False
-        for event in events:
-            if not event.type.startswith("entity."):
-                continue
-            if event.data["id"] != entity_id:
-                continue
-            supporting_event_ids.append(event.id)
-            deleted = False
-            if event.type == "entity.create":
-                entity_type = event.data["type"]
-                attrs = dict(event.data["attrs"])
-                state = True
-            elif event.type == "entity.update":
-                attrs.update(event.data["attrs"])
-                state = True
-            elif event.type == "entity.delete":
-                deleted = True
-                state = None
-                attrs = {}
-        if state is None or deleted:
+        folded = self.store.fold_entity_events(entity_id, events)
+        if folded is None:
             return None
         return TemporalEntityView(
-            entity_id=entity_id,
-            entity_type=entity_type,
-            attrs=dict(attrs),
+            entity_id=folded.entity_id,
+            entity_type=folded.entity_type,
+            attrs=dict(folded.attrs),
             unknown_attrs=[],
-            supporting_event_ids=supporting_event_ids,
+            supporting_event_ids=list(folded.supporting_event_ids),
             basis="known",
             as_of=target,
         )

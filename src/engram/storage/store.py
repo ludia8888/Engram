@@ -1,15 +1,28 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+from datetime import datetime
 import json
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
-from typing import TypeAlias
+from typing import Any, TypeAlias
 
 from engram.time_utils import from_rfc3339, to_rfc3339
 from engram.types import Entity, Event
 
 DirtyRangeRow: TypeAlias = tuple[str, str, str, str | None, str, str]
+
+
+@dataclass(slots=True)
+class FoldedEntityState:
+    entity_id: str
+    entity_type: str
+    attrs: dict[str, Any]
+    supporting_event_ids: list[str]
+    created_recorded_at: datetime | None
+    updated_recorded_at: datetime | None
+    active: bool
 
 
 def open_connection(db_path: Path) -> sqlite3.Connection:
@@ -175,31 +188,21 @@ class EventStore:
         return [self._row_to_event(row) for row in rows]
 
     def materialize_current_entity(self, entity_id: str) -> Entity | None:
-        return self._materialize_entity_from_events(entity_id, self.entity_events(entity_id))
-
-    def _row_to_event(self, row: sqlite3.Row) -> Event:
-        return Event(
-            id=row["id"],
-            seq=int(row["seq"]),
-            observed_at=from_rfc3339(row["observed_at"]),
-            effective_at_start=from_rfc3339(row["effective_at_start"]) if row["effective_at_start"] else None,
-            effective_at_end=from_rfc3339(row["effective_at_end"]) if row["effective_at_end"] else None,
-            recorded_at=from_rfc3339(row["recorded_at"]),
-            type=row["type"],
-            data=json.loads(row["data"]),
-            extraction_run_id=row["extraction_run_id"],
-            source_turn_id=row["source_turn_id"],
-            source_role=row["source_role"],
-            confidence=row["confidence"],
-            reason=row["reason"],
-            time_confidence=row["time_confidence"],
-            caused_by=row["caused_by"],
-            schema_version=int(row["schema_version"]),
+        folded = self.fold_entity_events(entity_id, self.entity_events(entity_id))
+        if folded is None:
+            return None
+        return Entity(
+            id=folded.entity_id,
+            type=folded.entity_type,
+            attrs=dict(folded.attrs),
+            created_recorded_at=folded.created_recorded_at,
+            updated_recorded_at=folded.updated_recorded_at,
         )
 
-    def _materialize_entity_from_events(self, entity_id: str, events: list[Event]) -> Entity | None:
+    def fold_entity_events(self, entity_id: str, events: list[Event]) -> FoldedEntityState | None:
         entity_type = "unknown"
-        attrs: dict = {}
+        attrs: dict[str, Any] = {}
+        supporting_event_ids: list[str] = []
         created_at = None
         updated_at = None
         active = False
@@ -207,6 +210,7 @@ class EventStore:
         for event in events:
             if not event.type.startswith("entity.") or event.data["id"] != entity_id:
                 continue
+            supporting_event_ids.append(event.id)
             if event.type == "entity.create":
                 entity_type = event.data["type"]
                 attrs = dict(event.data["attrs"])
@@ -228,10 +232,32 @@ class EventStore:
         if not active or created_at is None or updated_at is None:
             return None
 
-        return Entity(
-            id=entity_id,
-            type=entity_type,
+        return FoldedEntityState(
+            entity_id=entity_id,
+            entity_type=entity_type,
             attrs=dict(attrs),
+            supporting_event_ids=supporting_event_ids,
             created_recorded_at=created_at,
             updated_recorded_at=updated_at,
+            active=active,
+        )
+
+    def _row_to_event(self, row: sqlite3.Row) -> Event:
+        return Event(
+            id=row["id"],
+            seq=int(row["seq"]),
+            observed_at=from_rfc3339(row["observed_at"]),
+            effective_at_start=from_rfc3339(row["effective_at_start"]) if row["effective_at_start"] else None,
+            effective_at_end=from_rfc3339(row["effective_at_end"]) if row["effective_at_end"] else None,
+            recorded_at=from_rfc3339(row["recorded_at"]),
+            type=row["type"],
+            data=json.loads(row["data"]),
+            extraction_run_id=row["extraction_run_id"],
+            source_turn_id=row["source_turn_id"],
+            source_role=row["source_role"],
+            confidence=row["confidence"],
+            reason=row["reason"],
+            time_confidence=row["time_confidence"],
+            caused_by=row["caused_by"],
+            schema_version=int(row["schema_version"]),
         )

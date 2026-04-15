@@ -218,3 +218,38 @@ def test_rebuild_dirty_swaps_snapshot_reference_only_after_success(tmp_path):
         "diet": "vegetarian",
         "location": "Busan",
     }
+
+
+def test_rebuild_all_builds_snapshot_from_canonical_state_and_clears_dirty_ranges(tmp_path):
+    conn = open_connection(tmp_path / "engram.db")
+    store = EventStore(conn)
+    projector = Projector(store)
+
+    with store.transaction() as tx:
+        alice = _event(
+            str(uuid4()),
+            store.next_seq(tx),
+            "entity.create",
+            {"id": "user:alice", "type": "user", "attrs": {"diet": "vegetarian"}},
+        )
+        store.append_event(tx, alice)
+        store.append_event_entities(tx, alice.id, [("user:alice", "subject")])
+        _mark_dirty(store, tx, alice)
+
+        bob = _event(
+            str(uuid4()),
+            store.next_seq(tx),
+            "entity.create",
+            {"id": "user:bob", "type": "user", "attrs": {"diet": "vegan"}},
+        )
+        store.append_event(tx, bob)
+        store.append_event_entities(tx, bob.id, [("user:bob", "subject")])
+        _mark_dirty(store, tx, bob)
+
+    rebuilt = projector.rebuild_all()
+
+    snapshot = projector.current_snapshot()
+    assert rebuilt == 2
+    assert snapshot["user:alice"].attrs == {"diet": "vegetarian"}
+    assert snapshot["user:bob"].attrs == {"diet": "vegan"}
+    assert store.count_dirty_ranges() == 0
