@@ -270,6 +270,68 @@ def test_reprocess_reads_archived_raw_segments(tmp_path, monkeypatch):
     mem.close()
 
 
+def test_entity_delete_after_reprocess_ignores_superseded_relation_neighbors_for_dirty_rows(tmp_path, monkeypatch):
+    extractor = SequenceExtractor(
+        [
+            [
+                ExtractedEvent(
+                    type="entity.create",
+                    data={"id": "user:alice", "type": "user", "attrs": {"name": "Alice"}},
+                    effective_at_start=dt("2026-05-01T09:00:00Z"),
+                ),
+                ExtractedEvent(
+                    type="entity.create",
+                    data={"id": "user:bob", "type": "user", "attrs": {"name": "Bob"}},
+                    effective_at_start=dt("2026-05-01T09:00:00Z"),
+                ),
+                ExtractedEvent(
+                    type="relation.create",
+                    data={
+                        "source": "user:alice",
+                        "target": "user:bob",
+                        "type": "manager",
+                        "attrs": {"scope": "engram"},
+                    },
+                    effective_at_start=dt("2026-05-01T09:00:00Z"),
+                ),
+            ],
+            [
+                ExtractedEvent(
+                    type="entity.create",
+                    data={"id": "user:alice", "type": "user", "attrs": {"name": "Alice"}},
+                    effective_at_start=dt("2026-05-02T09:00:00Z"),
+                ),
+                ExtractedEvent(
+                    type="entity.create",
+                    data={"id": "user:bob", "type": "user", "attrs": {"name": "Bob"}},
+                    effective_at_start=dt("2026-05-02T09:00:00Z"),
+                ),
+            ],
+        ]
+    )
+    mem = Engram(user_id="alice", path=str(tmp_path), extractor=extractor)
+    ack = mem.turn("Alice and Bob are manager-linked", "ok", observed_at=dt("2026-05-01T10:00:00Z"))
+    monkeypatch.setattr("engram.canonical.utcnow", lambda: dt("2026-05-01T10:10:00Z"))
+    mem.flush("canonical")
+    mem.flush("projection")
+
+    monkeypatch.setattr("engram.canonical.utcnow", lambda: dt("2026-05-02T10:00:00Z"))
+    mem.reprocess(from_turn_id=ack.turn_id, to_turn_id=ack.turn_id)
+    mem.flush("projection")
+
+    assert mem.store.related_owner_ids_for_entity("user:alice") == []
+
+    mem.append(
+        "entity.delete",
+        {"id": "user:alice"},
+        observed_at=dt("2026-05-03T10:00:00Z"),
+    )
+
+    assert set(mem.store.dirty_owner_ids()) == {"user:alice"}
+
+    mem.close()
+
+
 def test_startup_catch_up_supersedes_prior_successful_run_when_extractor_version_changes(tmp_path, monkeypatch):
     class NoopExtractor:
         version = "noop-v1"
