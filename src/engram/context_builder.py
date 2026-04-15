@@ -5,7 +5,7 @@ from datetime import datetime
 
 from .storage.store import EventStore
 from .time_utils import to_rfc3339, utcnow
-from .types import Event, RawTurn, SearchResult, TemporalEntityView
+from .types import Event, RawTurn, RelationEdge, SearchResult, TemporalEntityView
 
 
 class ContextBuilder:
@@ -23,6 +23,7 @@ class ContextBuilder:
         include_history: bool,
         include_raw: bool,
         get_known_at,
+        get_known_relations_at,
     ) -> str:
         return self._build(
             mode="known",
@@ -33,6 +34,7 @@ class ContextBuilder:
             include_history=include_history,
             include_raw=include_raw,
             get_view=get_known_at,
+            get_relations=get_known_relations_at,
         )
 
     def build_valid(
@@ -45,6 +47,7 @@ class ContextBuilder:
         include_history: bool,
         include_raw: bool,
         get_valid_at,
+        get_valid_relations_at,
     ) -> str:
         return self._build(
             mode="valid",
@@ -55,6 +58,7 @@ class ContextBuilder:
             include_history=include_history,
             include_raw=include_raw,
             get_view=get_valid_at,
+            get_relations=get_valid_relations_at,
         )
 
     def _build(
@@ -68,6 +72,7 @@ class ContextBuilder:
         include_history: bool,
         include_raw: bool,
         get_view,
+        get_relations,
     ) -> str:
         basis_time = as_of or utcnow()
         supporting_events = self.store.events_by_ids(_supporting_event_ids(results))
@@ -83,11 +88,17 @@ class ContextBuilder:
         current_state = ["## Current State"]
         for result in results:
             view: TemporalEntityView | None = get_view(result.entity_id, basis_time)
-            if view is None:
+            relations: list[RelationEdge] = list(get_relations(result.entity_id, basis_time))
+            if view is None and not relations:
                 continue
-            line = f"- {view.entity_id} ({view.entity_type}) attrs={view.attrs}"
-            if view.unknown_attrs:
+            entity_id = result.entity_id if view is None else view.entity_id
+            entity_type = "unknown" if view is None else view.entity_type
+            attrs = {} if view is None else view.attrs
+            line = f"- {entity_id} ({entity_type}) attrs={attrs}"
+            if view is not None and view.unknown_attrs:
                 line += f" unknown_attrs={view.unknown_attrs}"
+            if relations:
+                line += f" relations={_relation_summaries(relations)}"
             current_state.append(line)
         if len(current_state) > 1:
             sections.append(current_state)
@@ -96,6 +107,9 @@ class ContextBuilder:
             change_lines = ["## Relevant Changes"]
             for event in supporting_events:
                 time_label = _event_time_label(event, mode)
+                if event.type.startswith("relation."):
+                    change_lines.append(_describe_relation_event(event, time_label))
+                    continue
                 if event.type == "entity.delete":
                     change_lines.append(
                         f"- {event.data['id']} deleted {time_label}"
@@ -162,6 +176,33 @@ def _event_time_label(event: Event, mode: str) -> str:
             f"..{to_rfc3339(event.effective_at_end)}"
         )
     return f"recorded_at={to_rfc3339(event.recorded_at)}"
+
+
+def _relation_summaries(relations: list[RelationEdge]) -> list[str]:
+    summaries: list[str] = []
+    for relation in relations:
+        if relation.direction == "outgoing":
+            summary = f"{relation.relation_type} -> {relation.other_entity_id}"
+        else:
+            summary = f"{relation.relation_type} <- {relation.other_entity_id}"
+        if relation.attrs:
+            summary += f" attrs={relation.attrs}"
+        summaries.append(summary)
+    return summaries
+
+
+def _describe_relation_event(event: Event, time_label: str) -> str:
+    source = event.data["source"]
+    target = event.data["target"]
+    relation_type = event.data["type"]
+    if event.type == "relation.delete":
+        return f"- relation {source} -[{relation_type}]-> {target} deleted {time_label}"
+    attrs = event.data.get("attrs", {})
+    return (
+        f"- relation {source} -[{relation_type}]-> {target} attrs={attrs} {time_label} "
+        f"confidence={event.confidence if event.confidence is not None else 'unknown'} "
+        f"reason={event.reason or 'n/a'}"
+    )
 
 
 def _truncate_sections(sections: list[list[str]], max_tokens: int) -> str:

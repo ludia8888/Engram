@@ -5,6 +5,7 @@ from uuid import uuid4
 import pytest
 
 from engram.projector import Projector
+from engram.event_ops import derive_dirty_rows, derive_event_entities
 from engram.storage.store import EventStore, open_connection
 from engram.time_utils import to_rfc3339, utcnow
 from engram.types import Event
@@ -47,6 +48,13 @@ def _mark_dirty(store: EventStore, tx, event: Event) -> None:
                 to_rfc3339(event.recorded_at),
             )
         ],
+    )
+
+
+def _mark_dirty_from_event_entities(store: EventStore, tx, event: Event) -> None:
+    store.mark_dirty(
+        tx,
+        derive_dirty_rows(event, derive_event_entities(event)),
     )
 
 
@@ -253,3 +261,106 @@ def test_rebuild_all_builds_snapshot_from_canonical_state_and_clears_dirty_range
     assert snapshot["user:alice"].attrs == {"diet": "vegetarian"}
     assert snapshot["user:bob"].attrs == {"diet": "vegan"}
     assert store.count_dirty_ranges() == 0
+
+
+def test_rebuild_dirty_builds_relation_snapshot_for_source_and_target(tmp_path):
+    conn = open_connection(tmp_path / "engram.db")
+    store = EventStore(conn)
+    projector = Projector(store)
+
+    with store.transaction() as tx:
+        alice = _event(
+            str(uuid4()),
+            store.next_seq(tx),
+            "entity.create",
+            {"id": "user:alice", "type": "user", "attrs": {"name": "Alice"}},
+        )
+        store.append_event(tx, alice)
+        store.append_event_entities(tx, alice.id, [("user:alice", "subject")])
+        _mark_dirty(store, tx, alice)
+
+        bob = _event(
+            str(uuid4()),
+            store.next_seq(tx),
+            "entity.create",
+            {"id": "user:bob", "type": "user", "attrs": {"name": "Bob"}},
+        )
+        store.append_event(tx, bob)
+        store.append_event_entities(tx, bob.id, [("user:bob", "subject")])
+        _mark_dirty(store, tx, bob)
+
+        relation = _event(
+            str(uuid4()),
+            store.next_seq(tx),
+            "relation.create",
+            {"source": "user:alice", "target": "user:bob", "type": "manager", "attrs": {"scope": "engram"}},
+        )
+        store.append_event(tx, relation)
+        store.append_event_entities(tx, relation.id, [("user:alice", "source"), ("user:bob", "target")])
+        _mark_dirty_from_event_entities(store, tx, relation)
+
+    projector.rebuild_dirty()
+
+    relation_snapshot = projector.current_relation_snapshot()
+    assert relation_snapshot["user:alice"][0].relation_type == "manager"
+    assert relation_snapshot["user:alice"][0].direction == "outgoing"
+    assert relation_snapshot["user:alice"][0].other_entity_id == "user:bob"
+    assert relation_snapshot["user:bob"][0].relation_type == "manager"
+    assert relation_snapshot["user:bob"][0].direction == "incoming"
+    assert relation_snapshot["user:bob"][0].other_entity_id == "user:alice"
+
+
+def test_rebuild_dirty_retracts_deleted_relation_from_relation_snapshot(tmp_path):
+    conn = open_connection(tmp_path / "engram.db")
+    store = EventStore(conn)
+    projector = Projector(store)
+
+    with store.transaction() as tx:
+        alice = _event(
+            str(uuid4()),
+            store.next_seq(tx),
+            "entity.create",
+            {"id": "user:alice", "type": "user", "attrs": {"name": "Alice"}},
+        )
+        store.append_event(tx, alice)
+        store.append_event_entities(tx, alice.id, [("user:alice", "subject")])
+        _mark_dirty(store, tx, alice)
+
+        bob = _event(
+            str(uuid4()),
+            store.next_seq(tx),
+            "entity.create",
+            {"id": "user:bob", "type": "user", "attrs": {"name": "Bob"}},
+        )
+        store.append_event(tx, bob)
+        store.append_event_entities(tx, bob.id, [("user:bob", "subject")])
+        _mark_dirty(store, tx, bob)
+
+        relation = _event(
+            str(uuid4()),
+            store.next_seq(tx),
+            "relation.create",
+            {"source": "user:alice", "target": "user:bob", "type": "manager", "attrs": {}},
+        )
+        store.append_event(tx, relation)
+        store.append_event_entities(tx, relation.id, [("user:alice", "source"), ("user:bob", "target")])
+        _mark_dirty_from_event_entities(store, tx, relation)
+
+    projector.rebuild_dirty()
+    assert "user:alice" in projector.current_relation_snapshot()
+
+    with store.transaction() as tx:
+        relation_delete = _event(
+            str(uuid4()),
+            store.next_seq(tx),
+            "relation.delete",
+            {"source": "user:alice", "target": "user:bob", "type": "manager"},
+        )
+        store.append_event(tx, relation_delete)
+        store.append_event_entities(tx, relation_delete.id, [("user:alice", "source"), ("user:bob", "target")])
+        _mark_dirty_from_event_entities(store, tx, relation_delete)
+
+    projector.rebuild_dirty()
+
+    assert "user:alice" not in projector.current_relation_snapshot()
+    assert "user:bob" not in projector.current_relation_snapshot()

@@ -18,7 +18,7 @@ from .semantic_index import SemanticIndexer
 from .storage import EventStore, SegmentedRawLog, WriterLock, open_connection
 from .storage.store import valid_event_sort_key
 from .time_utils import ensure_utc, to_rfc3339, utcnow
-from .types import Entity, Event, HistoryEntry, QueueItem, RawTurn, SearchResult, TemporalEntityView, TurnAck
+from .types import Entity, Event, HistoryEntry, QueueItem, RawTurn, RelationEdge, SearchResult, TemporalEntityView, TurnAck
 
 
 def _safe_user_id(user_id: str) -> str:
@@ -336,6 +336,7 @@ class Engram:
                 include_history=include_history,
                 include_raw=include_raw,
                 get_known_at=self.get_known_at,
+                get_known_relations_at=self._get_known_relations_at,
             )
         if time_mode == "valid":
             return self.context_builder.build_valid(
@@ -346,6 +347,7 @@ class Engram:
                 include_history=include_history,
                 include_raw=include_raw,
                 get_valid_at=self.get_valid_at,
+                get_valid_relations_at=self._get_valid_relations_at,
             )
         raise ValidationError(f"unsupported time_mode: {time_mode}")
 
@@ -375,3 +377,11 @@ class Engram:
             self.semantic_indexer.index_missing()
             return
         raise ValidationError(f"unsupported flush level: {level}")
+
+    def _get_known_relations_at(self, entity_id: str, at) -> list[RelationEdge]:
+        target = ensure_utc(at, "at")
+        return self.store.relation_edges_known_at(entity_id, to_rfc3339(target))
+
+    def _get_valid_relations_at(self, entity_id: str, at) -> list[RelationEdge]:
+        target = ensure_utc(at, "at")
+        return self.store.relation_edges_valid_at(entity_id, target)

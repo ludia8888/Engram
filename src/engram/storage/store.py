@@ -10,7 +10,7 @@ from typing import Any, TypeAlias
 
 from engram.semantic import embedding_from_blob
 from engram.time_utils import from_rfc3339, to_rfc3339, utcnow
-from engram.types import Entity, Event, ExtractionRun
+from engram.types import Entity, Event, ExtractionRun, RelationEdge
 
 DirtyRangeRow: TypeAlias = tuple[str, str, str, str | None, str, str]
 
@@ -544,6 +544,22 @@ class EventStore:
             updated_recorded_at=folded.updated_recorded_at,
         )
 
+    def materialize_current_relations(self, entity_id: str) -> list[RelationEdge]:
+        return self.fold_relation_edges(entity_id, self.entity_events_known_current(entity_id))
+
+    def relation_edges_known_at(self, entity_id: str, recorded_at: str) -> list[RelationEdge]:
+        return self.fold_relation_edges(
+            entity_id,
+            self.entity_events_known_visible_at(entity_id, recorded_at),
+        )
+
+    def relation_edges_valid_at(self, entity_id: str, at: datetime) -> list[RelationEdge]:
+        return self.fold_relation_edges_valid_at(
+            entity_id,
+            at,
+            events=self.entity_events_valid_visible(entity_id),
+        )
+
     def fold_entity_events(self, entity_id: str, events: list[Event]) -> FoldedEntityState | None:
         entity_type = "unknown"
         attrs: dict[str, Any] = {}
@@ -637,6 +653,27 @@ class EventStore:
             active=active,
         )
 
+    def fold_relation_edges(
+        self,
+        entity_id: str,
+        events: list[Event],
+    ) -> list[RelationEdge]:
+        return _fold_relation_edges(entity_id, events)
+
+    def fold_relation_edges_valid_at(
+        self,
+        entity_id: str,
+        at: datetime,
+        *,
+        events: list[Event] | None = None,
+    ) -> list[RelationEdge]:
+        visible_events = [
+            event
+            for event in (events if events is not None else self.entity_events_valid_visible(entity_id))
+            if covers_valid_time(event, at)
+        ]
+        return _fold_relation_edges(entity_id, visible_events)
+
     def _row_to_event(self, row: sqlite3.Row) -> Event:
         return Event(
             id=row["id"],
@@ -718,6 +755,54 @@ def _merge_unknown_attrs(existing: list[str], new_keys) -> list[str]:
         seen.add(key)
         merged.append(str(key))
     return merged
+
+
+def _fold_relation_edges(entity_id: str, events: list[Event]) -> list[RelationEdge]:
+    active_relations: dict[tuple[str, str, str], dict[str, Any]] = {}
+
+    for event in events:
+        if not event.type.startswith("relation."):
+            continue
+
+        source = str(event.data["source"])
+        target = str(event.data["target"])
+        relation_type = str(event.data["type"])
+        if entity_id not in {source, target}:
+            continue
+
+        key = (source, target, relation_type)
+        if event.type == "relation.create":
+            active_relations[key] = dict(event.data.get("attrs", {}))
+        elif event.type == "relation.update":
+            current = dict(active_relations.get(key, {}))
+            current.update(event.data.get("attrs", {}))
+            active_relations[key] = current
+        elif event.type == "relation.delete":
+            active_relations.pop(key, None)
+
+    edges: list[RelationEdge] = []
+    for (source, target, relation_type), attrs in active_relations.items():
+        if entity_id == source:
+            edges.append(
+                RelationEdge(
+                    relation_type=relation_type,
+                    other_entity_id=target,
+                    direction="outgoing",
+                    attrs=dict(attrs),
+                )
+            )
+        if entity_id == target:
+            edges.append(
+                RelationEdge(
+                    relation_type=relation_type,
+                    other_entity_id=source,
+                    direction="incoming",
+                    attrs=dict(attrs),
+                )
+            )
+
+    edges.sort(key=lambda edge: (edge.direction, edge.relation_type, edge.other_entity_id))
+    return edges
 
 
 def valid_event_sort_key(event: Event) -> tuple[bool, datetime, datetime, int]:
