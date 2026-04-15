@@ -794,6 +794,7 @@ def context(
 - relation event가 supporting event에 포함되면 source/target entity를 현재 상태 후보로 투영하고, active relation summary를 `Current State`에 함께 적는다.
 - relation event는 query의 mode/time 기준에서 양 endpoint entity가 모두 active일 때만 active relation seed로 취급한다.
 - `context(time_mode="valid", time_window=...)`의 relation summary는 `relations_active_in_window=...` 형식으로 표기하고, 구간 중 활성이라는 의미를 드러낸다.
+- 현재 구현에서 `context(time_mode="valid", time_window=...)`의 entity attrs는 여전히 `as_of=end_at` 기준 `get_valid_at()` 결과를 사용한다. 즉 한 줄 안에 `end_at` 시점 entity attrs와 `구간 중 활성` relation summary가 함께 보일 수 있다.
 - `include_raw=True`일 때만 `source_turn_id`를 따라 raw evidence를 붙인다.
 - `context(time_mode="valid")`는 `Current State`에 `unknown_attrs`를 함께 노출한다.
 - `Relevant Changes`는 entity attr 변경뿐 아니라 relation create/update/delete도 문장으로 렌더링한다.
@@ -1025,6 +1026,7 @@ query
 - relation event는 `valid` point query에서는 해당 시점에 active일 때만 seed가 되고, `valid` window query에서는 구간 중 한 번이라도 active였으면 seed가 된다.
 - `valid` mode는 `effective_at_start`가 없는 이벤트를 검색 seed에서 제외하고, 불확실성은 `context()`의 `unknown_attrs`에서 보완한다.
 - semantic row가 없는 이벤트는 lexical-only 후보로 남는다.
+- relation valid-window 검색은 correctness-first 구현이다. 현재는 visible event를 순회하면서 relation key/endpoint overlap을 Python helper로 계산하므로, relation 수가 많거나 window가 넓은 경우 이후 최적화 대상이 될 수 있다.
 
 ### 10.2 Run visibility 필터
 
