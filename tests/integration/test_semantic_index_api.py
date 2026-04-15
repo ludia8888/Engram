@@ -171,6 +171,38 @@ def test_search_uses_lexical_only_when_current_embedder_version_has_no_rows(tmp_
     second.close()
 
 
+def test_search_does_not_penalize_unindexed_lexical_hit_when_other_events_have_semantic_rows(tmp_path):
+    mem = Engram(
+        user_id="alice",
+        path=str(tmp_path),
+        embedder=StaticEmbedder(
+            mapping={
+                "ramen busan": [1.0, 0.0, 0.0],
+                "entity.create {\"attrs\": {\"dish\": \"ramen\"}, \"id\": \"food:old\", \"type\": \"food\"} manual": [1.0, 0.0, 0.0],
+            },
+        ),
+    )
+    mem.append(
+        "entity.create",
+        {"id": "food:old", "type": "food", "attrs": {"dish": "ramen"}},
+        observed_at=dt("2026-05-01T10:00:00Z"),
+    )
+    mem.flush("index")
+    mem.append(
+        "entity.create",
+        {"id": "food:new", "type": "food", "attrs": {"dish": "ramen", "location": "Busan"}},
+        observed_at=dt("2026-05-01T11:00:00Z"),
+    )
+
+    results = mem.search("ramen busan", k=5)
+
+    assert results
+    assert results[0].entity_id == "food:new"
+    assert "semantic" not in results[0].matched_axes
+
+    mem.close()
+
+
 def test_context_uses_semantic_supporting_events_in_known_mode(tmp_path):
     mem = Engram(
         user_id="alice",

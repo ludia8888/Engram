@@ -126,13 +126,12 @@ class RetrievalEngine:
             for event in events
         }
         semantic_scores = self._semantic_scores(query, events)
-        has_any_semantic = bool(semantic_scores)
 
         scored_events: list[ScoredEvent] = []
         for event in events:
             lexical_score = lexical_scores.get(event.id, 0.0)
             semantic_score = semantic_scores.get(event.id, 0.0)
-            if has_any_semantic:
+            if semantic_score > 0:
                 combined = (
                     (_LEXICAL_WEIGHT * lexical_score if lexical_score > 0 else 0.0)
                     + (_SEMANTIC_WEIGHT * semantic_score if semantic_score > 0 else 0.0)
