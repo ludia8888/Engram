@@ -203,6 +203,40 @@ def test_search_does_not_penalize_unindexed_lexical_hit_when_other_events_have_s
     mem.close()
 
 
+def test_search_keeps_semantic_axis_when_same_entity_has_semantic_and_lexical_only_support(tmp_path):
+    mem = Engram(
+        user_id="alice",
+        path=str(tmp_path),
+        embedder=StaticEmbedder(
+            mapping={
+                "ramen busan": [1.0, 0.0, 0.0],
+                "entity.create {\"attrs\": {\"dish\": \"noodle-soup\"}, \"id\": \"food:item\", \"type\": \"food\"} manual": [1.0, 0.0, 0.0],
+            },
+        ),
+    )
+    old_event_id = mem.append(
+        "entity.create",
+        {"id": "food:item", "type": "food", "attrs": {"dish": "noodle-soup"}},
+        observed_at=dt("2026-05-01T10:00:00Z"),
+    )
+    mem.flush("index")
+    new_event_id = mem.append(
+        "entity.update",
+        {"id": "food:item", "attrs": {"note": "ramen busan"}},
+        observed_at=dt("2026-05-01T11:00:00Z"),
+    )
+
+    results = mem.search("ramen busan", k=5)
+
+    assert results
+    assert results[0].entity_id == "food:item"
+    assert "semantic" in results[0].matched_axes
+    assert results[0].supporting_event_ids[0] == new_event_id
+    assert old_event_id in results[0].supporting_event_ids
+
+    mem.close()
+
+
 def test_context_uses_semantic_supporting_events_in_known_mode(tmp_path):
     mem = Engram(
         user_id="alice",
