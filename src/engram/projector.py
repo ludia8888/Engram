@@ -19,6 +19,27 @@ class Projector:
     def current_relation_snapshot(self) -> Mapping[str, tuple[RelationEdge, ...]]:
         return self._relation_snapshot
 
+    def _materialize_owner(self, owner_id: str) -> tuple[Entity | None, tuple[RelationEdge, ...]]:
+        entity = self.store.materialize_current_entity(owner_id)
+        relations = tuple(self.store.materialize_current_relations(owner_id))
+        return entity, relations
+
+    def _apply_owner_materialization(
+        self,
+        owner_id: str,
+        new_snapshot: dict[str, Entity],
+        new_relation_snapshot: dict[str, tuple[RelationEdge, ...]],
+    ) -> None:
+        entity, relations = self._materialize_owner(owner_id)
+        if entity is None:
+            new_snapshot.pop(owner_id, None)
+        else:
+            new_snapshot[owner_id] = entity
+        if relations:
+            new_relation_snapshot[owner_id] = relations
+        else:
+            new_relation_snapshot.pop(owner_id, None)
+
     def rebuild_dirty(self) -> int:
         owners = self.store.dirty_owner_ids()
         if not owners:
@@ -27,16 +48,7 @@ class Projector:
         new_snapshot = dict(self._snapshot)
         new_relation_snapshot = dict(self._relation_snapshot)
         for owner_id in owners:
-            entity = self.store.materialize_current_entity(owner_id)
-            relations = tuple(self.store.materialize_current_relations(owner_id))
-            if entity is None:
-                new_snapshot.pop(owner_id, None)
-            else:
-                new_snapshot[owner_id] = entity
-            if relations:
-                new_relation_snapshot[owner_id] = relations
-            else:
-                new_relation_snapshot.pop(owner_id, None)
+            self._apply_owner_materialization(owner_id, new_snapshot, new_relation_snapshot)
 
         with self.store.transaction() as tx:
             self.store.clear_dirty_ranges_for_owners(tx, owners)
@@ -45,21 +57,37 @@ class Projector:
         self._relation_snapshot = MappingProxyType(new_relation_snapshot)
         return len(owners)
 
+    def rebuild_owner(self, owner_id: str) -> bool:
+        new_snapshot = dict(self._snapshot)
+        new_relation_snapshot = dict(self._relation_snapshot)
+        self._apply_owner_materialization(owner_id, new_snapshot, new_relation_snapshot)
+
+        with self.store.transaction() as tx:
+            self.store.clear_dirty_ranges_for_owners(tx, [owner_id])
+
+        self._snapshot = MappingProxyType(new_snapshot)
+        self._relation_snapshot = MappingProxyType(new_relation_snapshot)
+        return True
+
+    def rebuild_dirty_until_stable(self) -> int:
+        rebuilt_total = 0
+        while self.store.dirty_owner_ids():
+            rebuilt = self.rebuild_dirty()
+            rebuilt_total += rebuilt
+            if rebuilt == 0 and self.store.dirty_owner_ids():
+                raise RuntimeError("projection rebuild made no progress")
+        return rebuilt_total
+
     def rebuild_all(self) -> int:
-        owners = self.store.all_entity_ids()
+        owners = sorted(set(self.store.all_entity_ids()) | set(self._snapshot.keys()) | set(self._relation_snapshot.keys()))
         new_snapshot: dict[str, Entity] = {}
         new_relation_snapshot: dict[str, tuple[RelationEdge, ...]] = {}
         for owner_id in owners:
-            entity = self.store.materialize_current_entity(owner_id)
-            relations = tuple(self.store.materialize_current_relations(owner_id))
-            if entity is not None:
-                new_snapshot[owner_id] = entity
-            if relations:
-                new_relation_snapshot[owner_id] = relations
+            self._apply_owner_materialization(owner_id, new_snapshot, new_relation_snapshot)
 
         with self.store.transaction() as tx:
             self.store.clear_all_dirty_ranges(tx)
 
         self._snapshot = MappingProxyType(new_snapshot)
         self._relation_snapshot = MappingProxyType(new_relation_snapshot)
-        return len(new_snapshot)
+        return len(owners)
