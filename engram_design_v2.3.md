@@ -125,6 +125,7 @@ pip install -e ".[dev]"
 주의:
 - 현재 런타임의 `append()`는 `entity.*`와 `relation.*` 이벤트를 모두 허용한다.
 - 다만 relation 전용 public API는 아직 없고, 현재 relation read는 `search()`, `context()`, internal projection에서만 반영된다.
+- 현재 active relation은 양 endpoint entity가 같은 mode/time 기준에서 모두 유효할 때만 보인다.
 
 ```python
 from engram import Engram
@@ -694,6 +695,7 @@ def append(
 - `append()`는 L1 canonical commit을 동기 수행한다.
 - 현재 런타임에서 `append()`가 허용하는 structured 이벤트는 `entity.create`, `entity.update`, `entity.delete`, `relation.create`, `relation.update`, `relation.delete`다.
 - relation 전용 public read API는 아직 없지만, relation 이벤트는 canonical replay, `search()`, `context()`, projector rebuild에 반영된다.
+- `relation.update`는 prior `relation.create`가 없어도 active relation을 만든 것으로 해석한다.
 
 ### 7.4 Flush API
 
@@ -789,6 +791,7 @@ def context(
 - semantic row가 없는 경우에도 검색은 lexical-only로 정상 동작한다.
 - `context()`는 `search()` 결과를 바탕으로 `Memory Basis / Current State / Relevant Changes / Raw Evidence` 섹션을 만든다.
 - relation event가 supporting event에 포함되면 source/target entity를 현재 상태 후보로 투영하고, active relation summary를 `Current State`에 함께 적는다.
+- relation event는 query의 mode/time 기준에서 양 endpoint entity가 모두 active일 때만 active relation seed로 취급한다.
 - `include_raw=True`일 때만 `source_turn_id`를 따라 raw evidence를 붙인다.
 - `context(time_mode="valid")`는 `Current State`에 `unknown_attrs`를 함께 노출한다.
 - `Relevant Changes`는 entity attr 변경뿐 아니라 relation create/update/delete도 문장으로 렌더링한다.

@@ -236,6 +236,76 @@ def test_context_valid_only_shows_relations_active_in_requested_window(tmp_path)
     mem.close()
 
 
+def test_deleted_endpoint_retracts_relation_from_search_context_and_projection(tmp_path):
+    mem = Engram(user_id="alice", path=str(tmp_path))
+    _append_people(mem)
+    mem.append(
+        "relation.create",
+        {
+            "source": "user:alice",
+            "target": "user:bob",
+            "type": "manager",
+            "attrs": {"scope": "engram"},
+        },
+        observed_at=dt("2026-05-01T10:00:00Z"),
+        effective_at_start=dt("2026-05-01T00:00:00Z"),
+        source_role="manual",
+        time_confidence="exact",
+    )
+    mem.flush("projection")
+
+    assert mem.search("manager", k=5)
+    assert "manager -> user:bob" in mem.context("manager", max_tokens=600)
+    assert "user:alice" in mem.projector.current_relation_snapshot()
+
+    mem.append(
+        "entity.delete",
+        {"id": "user:bob"},
+        observed_at=dt("2026-05-03T10:00:00Z"),
+        effective_at_start=dt("2026-05-03T00:00:00Z"),
+        source_role="manual",
+        time_confidence="exact",
+    )
+    mem.flush("projection")
+
+    assert mem.search("manager", k=5) == []
+    context = mem.context("manager", max_tokens=600)
+    assert "manager -> user:bob" not in context
+    assert "user:bob (unknown)" not in context
+    assert "user:alice" not in mem.projector.current_relation_snapshot()
+    assert "user:bob" not in mem.projector.current_relation_snapshot()
+
+    mem.close()
+
+
+def test_relation_update_without_prior_create_is_treated_as_active_relation(tmp_path):
+    mem = Engram(user_id="alice", path=str(tmp_path))
+    _append_people(mem)
+    mem.append(
+        "relation.update",
+        {
+            "source": "user:alice",
+            "target": "user:bob",
+            "type": "mentor",
+            "attrs": {"cadence": "weekly"},
+        },
+        observed_at=dt("2026-05-01T10:00:00Z"),
+        effective_at_start=dt("2026-05-01T00:00:00Z"),
+        source_role="manual",
+        reason="relation update is treated as upsert",
+        time_confidence="exact",
+    )
+    mem.flush("projection")
+
+    assert mem.search("mentor weekly", k=5)
+    text = mem.context("mentor", max_tokens=600)
+    assert "mentor -> user:bob" in text
+    assert "cadence': 'weekly'" in text
+    assert mem.projector.current_relation_snapshot()["user:alice"][0].relation_type == "mentor"
+
+    mem.close()
+
+
 def test_reprocess_retracts_stale_relation_from_search_context_and_projection(tmp_path, monkeypatch):
     extractor = SequenceExtractor(
         [
@@ -260,35 +330,26 @@ def test_reprocess_retracts_stale_relation_from_search_context_and_projection(tm
     _append_people(mem)
     ack = mem.turn("Bob is my manager", "Okay", observed_at=dt("2026-05-01T10:00:00Z"))
 
-    monkeypatch.setattr("engram.canonical.utcnow", lambda: dt("2026-05-01T10:00:05Z"))
+    monkeypatch.setattr("engram.canonical.utcnow", lambda: dt("2026-04-01T10:00:05Z"))
     mem.flush("canonical")
     mem.flush("projection")
 
     assert mem.projector.current_relation_snapshot()["user:alice"][0].relation_type == "manager"
-    assert mem.search(
-        "manager",
-        k=5,
-        time_window=(dt("2026-05-01T00:00:00Z"), dt("2026-05-01T11:00:00Z")),
-    )
+    assert mem.search("manager", k=5)
 
-    monkeypatch.setattr("engram.canonical.utcnow", lambda: dt("2026-05-02T10:00:00Z"))
+    monkeypatch.setattr("engram.canonical.utcnow", lambda: dt("2026-04-02T10:00:00Z"))
     count = mem.reprocess(from_turn_id=ack.turn_id, to_turn_id=ack.turn_id)
     assert count == 1
     mem.flush("projection")
 
     assert "user:alice" not in mem.projector.current_relation_snapshot()
     assert "user:bob" not in mem.projector.current_relation_snapshot()
-    assert mem.search(
-        "manager",
-        k=5,
-        time_window=(dt("2026-05-02T00:00:00Z"), dt("2026-05-02T11:00:00Z")),
-    ) == []
+    assert mem.search("manager", k=5) == []
     assert (
         "manager -> user:bob"
         not in mem.context(
             "manager",
             max_tokens=400,
-            time_window=(dt("2026-05-02T00:00:00Z"), dt("2026-05-02T11:00:00Z")),
         )
     )
 

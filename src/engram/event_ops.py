@@ -70,3 +70,25 @@ def derive_dirty_rows(
             )
         )
     return rows
+
+
+def derive_cascade_dirty_rows_for_entity_event(
+    event: Event,
+    owner_ids: list[str],
+) -> list[tuple[str, str, str, str | None, str, str]]:
+    if event.type not in {"entity.create", "entity.delete"} or not owner_ids:
+        return []
+    created_at = to_rfc3339(utcnow())
+    from_recorded_at = to_rfc3339(event.recorded_at)
+    from_effective_at = to_rfc3339(event.effective_at_start) if event.effective_at_start else None
+    return [
+        (
+            str(uuid4()),
+            owner_id,
+            from_recorded_at,
+            from_effective_at,
+            f"cascade:{event.type}:{event.id}",
+            created_at,
+        )
+        for owner_id in owner_ids
+    ]

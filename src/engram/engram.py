@@ -9,7 +9,7 @@ from uuid import uuid4
 from .canonical import CanonicalWorker, Extractor, NullExtractor
 from .context_builder import ContextBuilder
 from .errors import ValidationError
-from .event_ops import derive_dirty_rows, derive_event_entities, validate_event
+from .event_ops import derive_cascade_dirty_rows_for_entity_event, derive_dirty_rows, derive_event_entities, validate_event
 from .projector import Projector
 from .recovery import RecoveryService
 from .retrieval import RetrievalEngine
@@ -152,6 +152,12 @@ class Engram:
             )
             event_entities = derive_event_entities(event)
             dirty_rows = derive_dirty_rows(event, event_entities)
+            dirty_rows.extend(
+                derive_cascade_dirty_rows_for_entity_event(
+                    event,
+                    self.store.related_owner_ids_for_entity(event.data["id"]) if event.type.startswith("entity.") else [],
+                )
+            )
             self.store.append_event(tx, event)
             self.store.append_event_entities(tx, event.id, event_entities)
             self.store.mark_dirty(tx, dirty_rows)

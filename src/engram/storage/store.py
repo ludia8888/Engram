@@ -323,6 +323,25 @@ class EventStore:
         ).fetchall()
         return [str(row[0]) for row in rows]
 
+    def related_owner_ids_for_entity(self, entity_id: str) -> list[str]:
+        rows = self.conn.execute(
+            """
+            SELECT DISTINCT CASE
+                WHEN json_extract(e.data, '$.source') = ? THEN json_extract(e.data, '$.target')
+                WHEN json_extract(e.data, '$.target') = ? THEN json_extract(e.data, '$.source')
+            END AS other_entity_id
+            FROM events e
+            WHERE e.type LIKE 'relation.%'
+              AND (
+                    json_extract(e.data, '$.source') = ?
+                 OR json_extract(e.data, '$.target') = ?
+              )
+            ORDER BY other_entity_id ASC
+            """,
+            (entity_id, entity_id, entity_id, entity_id),
+        ).fetchall()
+        return [str(row["other_entity_id"]) for row in rows if row["other_entity_id"] is not None]
+
     def append_extraction_run(self, tx: sqlite3.Connection, run: ExtractionRun) -> None:
         tx.execute(
             """
@@ -545,19 +564,35 @@ class EventStore:
         )
 
     def materialize_current_relations(self, entity_id: str) -> list[RelationEdge]:
-        return self.fold_relation_edges(entity_id, self.entity_events_known_current(entity_id))
+        return self.relation_edges_known_at(entity_id, to_rfc3339(utcnow()))
 
     def relation_edges_known_at(self, entity_id: str, recorded_at: str) -> list[RelationEdge]:
+        active_cache: dict[str, bool] = {}
+
+        def endpoint_active(candidate_id: str) -> bool:
+            if candidate_id not in active_cache:
+                active_cache[candidate_id] = self._entity_is_known_active_at(candidate_id, recorded_at)
+            return active_cache[candidate_id]
+
         return self.fold_relation_edges(
             entity_id,
             self.entity_events_known_visible_at(entity_id, recorded_at),
+            endpoint_active=endpoint_active,
         )
 
     def relation_edges_valid_at(self, entity_id: str, at: datetime) -> list[RelationEdge]:
+        active_cache: dict[str, bool] = {}
+
+        def endpoint_active(candidate_id: str) -> bool:
+            if candidate_id not in active_cache:
+                active_cache[candidate_id] = self._entity_is_valid_active_at(candidate_id, at)
+            return active_cache[candidate_id]
+
         return self.fold_relation_edges_valid_at(
             entity_id,
             at,
             events=self.entity_events_valid_visible(entity_id),
+            endpoint_active=endpoint_active,
         )
 
     def fold_entity_events(self, entity_id: str, events: list[Event]) -> FoldedEntityState | None:
@@ -657,8 +692,10 @@ class EventStore:
         self,
         entity_id: str,
         events: list[Event],
+        *,
+        endpoint_active=None,
     ) -> list[RelationEdge]:
-        return _fold_relation_edges(entity_id, events)
+        return _fold_relation_edges(entity_id, events, endpoint_active=endpoint_active)
 
     def fold_relation_edges_valid_at(
         self,
@@ -666,13 +703,44 @@ class EventStore:
         at: datetime,
         *,
         events: list[Event] | None = None,
+        endpoint_active=None,
     ) -> list[RelationEdge]:
         visible_events = [
             event
             for event in (events if events is not None else self.entity_events_valid_visible(entity_id))
             if covers_valid_time(event, at)
         ]
-        return _fold_relation_edges(entity_id, visible_events)
+        return _fold_relation_edges(entity_id, visible_events, endpoint_active=endpoint_active)
+
+    def relation_event_is_live_known(self, event: Event, recorded_at: str) -> bool:
+        if not event.type.startswith("relation."):
+            return True
+        return self._entity_is_known_active_at(str(event.data["source"]), recorded_at) and self._entity_is_known_active_at(
+            str(event.data["target"]),
+            recorded_at,
+        )
+
+    def relation_event_is_live_valid(self, event: Event, at: datetime) -> bool:
+        if not event.type.startswith("relation."):
+            return True
+        return self._entity_is_valid_active_at(str(event.data["source"]), at) and self._entity_is_valid_active_at(
+            str(event.data["target"]),
+            at,
+        )
+
+    def _entity_is_known_active_at(self, entity_id: str, recorded_at: str) -> bool:
+        return self.fold_entity_events(
+            entity_id,
+            self.entity_events_known_visible_at(entity_id, recorded_at),
+        ) is not None
+
+    def _entity_is_valid_active_at(self, entity_id: str, at: datetime) -> bool:
+        folded = self.fold_entity_events_valid_at(
+            entity_id,
+            at,
+            events=self.entity_events_valid_visible(entity_id),
+        )
+        return folded is not None and folded.active
 
     def _row_to_event(self, row: sqlite3.Row) -> Event:
         return Event(
@@ -757,7 +825,12 @@ def _merge_unknown_attrs(existing: list[str], new_keys) -> list[str]:
     return merged
 
 
-def _fold_relation_edges(entity_id: str, events: list[Event]) -> list[RelationEdge]:
+def _fold_relation_edges(
+    entity_id: str,
+    events: list[Event],
+    *,
+    endpoint_active=None,
+) -> list[RelationEdge]:
     active_relations: dict[tuple[str, str, str], dict[str, Any]] = {}
 
     for event in events:
@@ -782,6 +855,8 @@ def _fold_relation_edges(entity_id: str, events: list[Event]) -> list[RelationEd
 
     edges: list[RelationEdge] = []
     for (source, target, relation_type), attrs in active_relations.items():
+        if endpoint_active is not None and (not endpoint_active(source) or not endpoint_active(target)):
+            continue
         if entity_id == source:
             edges.append(
                 RelationEdge(
