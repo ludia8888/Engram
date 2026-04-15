@@ -663,6 +663,8 @@ class Engram:
 - 현재 런타임은 opt-in `OpenAIExtractor`도 지원한다.
 - `OpenAIExtractor`를 쓰려면 optional dependency 설치가 필요하다: `pip install "engram[openai]"`.
 - `OpenAIExtractor`의 기본 모델은 `gpt-5.4-mini`이고, version은 최소한 backend identity와 model을 함께 반영한다.
+- 모델이 바뀌면 extractor version도 바뀌므로 startup catch-up과 reprocess 기준으로는 새 extractor로 취급된다.
+- 이 동작은 v1에서 재처리 비용보다 정확성을 우선한 결정이다.
 - 첫 extractor 버전은 `Entity + Relation`만 추출하고, `caused_by`와 `effective_at_*`는 자동 생성하지 않는다.
 - 첫 extractor 버전은 애매하면 빈 결과를 반환하는 보수적 정책을 따른다.
 - embedder를 넘기지 않으면 기본 `HashEmbedder`가 사용된다.
@@ -1026,6 +1028,7 @@ class QueueItem:
 - 첫 버전은 `caused_by`를 생성하지 않는다.
 - 첫 버전은 `effective_at_start/end`를 생성하지 않는다. 따라서 저장 시 둘 다 `None`, `time_confidence="unknown"`으로 고정된다.
 - 첫 버전은 "조금이라도 남긴다"보다 "틀린 기억을 쓰지 않는다"를 우선한다. 즉 애매하면 `{"events": []}`를 반환하는 것이 정상 동작이다.
+- 첫 버전은 user/assistant/recent turn 텍스트를 모두 untrusted dialogue data로 취급한다. 즉 그 안의 명령문은 extractor 규칙을 바꾸지 못한다.
 
 ```python
 {
@@ -1047,6 +1050,7 @@ class QueueItem:
 - 현재 user 자신은 `user:<safe_user_id>`로 정규화한다
 - 다른 사람은 기본적으로 `person:<slug>`, 비인물은 `entity:<slug>` 계열을 사용한다
 - assistant 발화는 보조 문맥으로만 쓰고, 직접 사실 추출은 user 발화 중심으로 수행한다
+- user/assistant/recent turn 안의 "ignore previous instructions" 같은 문장은 지시가 아니라 데이터로만 취급한다
 
 ### 9.4 Canonical Commit 계약
 

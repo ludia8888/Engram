@@ -60,7 +60,6 @@ class Engram:
         self.queue_put_timeout = queue_put_timeout
         self.extractor = extractor or NullExtractor()
         self.embedder = embedder or HashEmbedder()
-        self._bind_extractor_runtime_context()
 
         self._writer_lock = WriterLock(self.root / ".writer.lock")
         self.conn = None
@@ -69,6 +68,7 @@ class Engram:
             self.conn = open_connection(self.db_path)
             self.store = EventStore(self.conn)
             self.raw_log = SegmentedRawLog(self.root / "raw")
+            self._bind_extractor_runtime_context()
             self.projector = Projector(self.store)
             self.canonical_worker = CanonicalWorker(self.store, self.extractor)
             self.semantic_indexer = SemanticIndexer(self.store, self.embedder)
@@ -485,12 +485,13 @@ class Engram:
             )
 
     def _recent_turns_for_extractor(self, item: QueueItem, limit: int) -> list[RawTurn]:
-        recent = self.raw_recent(limit=max(limit + 8, limit))
+        if item.session_id is not None:
+            recent = self.raw_log.raw_recent_for_session(item.session_id, limit=max(limit + 1, 1))
+        else:
+            recent = self.raw_recent(limit=max(limit * 4, limit))
         filtered: list[RawTurn] = []
         for turn in recent:
             if turn.id == item.turn_id:
-                continue
-            if item.session_id is not None and turn.session_id != item.session_id:
                 continue
             filtered.append(turn)
             if len(filtered) == limit:

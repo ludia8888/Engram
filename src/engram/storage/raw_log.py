@@ -63,6 +63,10 @@ class SegmentedRawLog:
         turns = list(self._iter_turns())
         return list(reversed(turns[-limit:]))
 
+    def raw_recent_for_session(self, session_id: str, limit: int = 20) -> list[RawTurn]:
+        turns = [turn for turn in self._iter_turns() if turn.session_id == session_id]
+        return list(reversed(turns[-limit:]))
+
     def raw_all(self) -> list[RawTurn]:
         return list(self._iter_turns())
 

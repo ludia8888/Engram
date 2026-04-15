@@ -46,9 +46,16 @@ def _install_fake_openai(monkeypatch, responses: list[dict | str], requests: lis
             if not responses:
                 raise AssertionError("no fake OpenAI responses left")
             payload = responses.pop(0)
+            if isinstance(payload, dict) and "_raw_response" in payload:
+                return payload["_raw_response"]
             content = payload if isinstance(payload, str) else json.dumps(payload, ensure_ascii=False)
             return types.SimpleNamespace(
-                choices=[types.SimpleNamespace(message=types.SimpleNamespace(content=content))]
+                choices=[
+                    types.SimpleNamespace(
+                        message=types.SimpleNamespace(content=content, refusal=None),
+                        finish_reason="stop",
+                    )
+                ]
             )
 
     class FakeOpenAI:
@@ -171,3 +178,82 @@ def test_openai_extractor_requires_runtime_binding(monkeypatch):
 
     with pytest.raises(RuntimeError, match="must be bound"):
         extractor.extract(_queue_item())
+
+
+def test_openai_extractor_surfaces_refusal_reason(monkeypatch):
+    _install_fake_openai(
+        monkeypatch,
+        [
+            {
+                "_raw_response": types.SimpleNamespace(
+                    choices=[
+                        types.SimpleNamespace(
+                            message=types.SimpleNamespace(content=None, refusal="safety refusal"),
+                            finish_reason="stop",
+                        )
+                    ]
+                )
+            }
+        ],
+    )
+    extractor = OpenAIExtractor()
+    extractor.bind_runtime_context(
+        safe_user_id="alice",
+        recent_turns_provider=lambda item, limit: [],
+    )
+
+    with pytest.raises(ValidationError, match="safety refusal"):
+        extractor.extract(_queue_item())
+
+
+def test_openai_extractor_surfaces_truncated_json_error(monkeypatch):
+    _install_fake_openai(
+        monkeypatch,
+        [
+            {
+                "_raw_response": types.SimpleNamespace(
+                    choices=[
+                        types.SimpleNamespace(
+                            message=types.SimpleNamespace(content='{"events":[', refusal=None),
+                            finish_reason="length",
+                        )
+                    ]
+                )
+            }
+        ],
+    )
+    extractor = OpenAIExtractor()
+    extractor.bind_runtime_context(
+        safe_user_id="alice",
+        recent_turns_provider=lambda item, limit: [],
+    )
+
+    with pytest.raises(ValidationError, match="truncated"):
+        extractor.extract(_queue_item())
+
+
+def test_openai_extractor_handles_hangul_jamo_slug(monkeypatch):
+    _install_fake_openai(
+        monkeypatch,
+        [
+            {
+                "events": [
+                    {
+                        "type": "entity.create",
+                        "data": {"id": "ㄱㅣㅁ 철수", "type": "person", "attrs": {"name": "김철수"}},
+                        "confidence": 0.9,
+                        "reason": "사용자가 이름을 명시함",
+                    }
+                ]
+            }
+        ],
+    )
+    extractor = OpenAIExtractor()
+    extractor.bind_runtime_context(
+        safe_user_id="alice",
+        recent_turns_provider=lambda item, limit: [],
+    )
+
+    events = extractor.extract(_queue_item())
+
+    assert events[0].data["id"] == "person:ㄱㅣㅁ-철수"
