@@ -53,6 +53,16 @@ class StaticEmbedder:
         return [list(self._mapping.get(text, [0.0] * self.dim)) for text in texts]
 
 
+class CountingEmbedder(StaticEmbedder):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.calls: list[list[str]] = []
+
+    def embed_texts(self, texts: list[str]) -> list[list[float]]:
+        self.calls.append(list(texts))
+        return super().embed_texts(texts)
+
+
 def install_fake_openai(monkeypatch, mapping: dict[str, list[float]], *, dimensions: int | None = None):
     class FakeEmbeddings:
         def create(self, *, model, input, dimensions=None):
@@ -457,6 +467,136 @@ def test_context_uses_semantic_supporting_events_in_valid_mode(tmp_path):
     assert "- mode: valid" in text
     assert "food:ramen" in text
     assert "noodle-soup" in text
+
+    mem.close()
+
+
+def test_flush_index_backfills_missing_lexical_search_terms(tmp_path):
+    mem = Engram(
+        user_id="alice",
+        path=str(tmp_path),
+        embedder=StaticEmbedder(
+            mapping={
+                'entity.create {"attrs": {"diet": "vegetarian"}, "id": "user:alice", "type": "user"} manual': [1.0, 0.0, 0.0],
+            }
+        ),
+    )
+    mem.append(
+        "entity.create",
+        {"id": "user:alice", "type": "user", "attrs": {"diet": "vegetarian"}},
+        observed_at=dt("2026-05-01T10:00:00Z"),
+    )
+    assert mem.store.count_event_search_terms() > 0
+
+    mem.conn.execute("DELETE FROM event_search_terms")
+    mem.conn.commit()
+
+    assert mem.store.count_event_search_terms() == 0
+
+    mem.flush("index")
+
+    assert mem.store.count_event_search_terms() > 0
+    assert mem.search("vegetarian", k=5)[0].entity_id == "user:alice"
+
+    mem.close()
+
+
+def test_repeated_semantic_search_reuses_query_embedding(tmp_path):
+    embedder = CountingEmbedder(
+        version="counting-v1",
+        mapping={
+            "ramen": [1.0, 0.0, 0.0],
+            'entity.create {"attrs": {"food": "noodle-soup"}, "id": "food:ramen", "type": "food"} manual': [1.0, 0.0, 0.0],
+        },
+    )
+    mem = Engram(user_id="alice", path=str(tmp_path), embedder=embedder)
+    mem.append(
+        "entity.create",
+        {"id": "food:ramen", "type": "food", "attrs": {"food": "noodle-soup"}},
+        observed_at=dt("2026-05-01T10:00:00Z"),
+    )
+    mem.flush("index")
+    embedder.calls.clear()
+
+    first = mem.search("ramen", k=5)
+    second = mem.search("ramen", k=5)
+
+    assert first and second
+    assert embedder.calls == [["ramen"]]
+
+    mem.close()
+
+
+def test_query_embedding_cache_is_separated_by_embedder_version(tmp_path):
+    embedder = CountingEmbedder(
+        version="counting-v1",
+        mapping={
+            "ramen": [1.0, 0.0, 0.0],
+            'entity.create {"attrs": {"food": "noodle-soup"}, "id": "food:ramen", "type": "food"} manual': [1.0, 0.0, 0.0],
+        },
+    )
+    mem = Engram(user_id="alice", path=str(tmp_path), embedder=embedder)
+    mem.append(
+        "entity.create",
+        {"id": "food:ramen", "type": "food", "attrs": {"food": "noodle-soup"}},
+        observed_at=dt("2026-05-01T10:00:00Z"),
+    )
+    mem.flush("index")
+    embedder.calls.clear()
+
+    mem.search("ramen", k=5)
+
+    embedder.version = "counting-v2"
+    mem.flush("index")
+    embedder.calls.clear()
+
+    mem.search("ramen", k=5)
+
+    assert embedder.calls == [["ramen"]]
+
+    mem.close()
+
+
+def test_search_passes_candidate_ids_into_visible_event_fetch(tmp_path, monkeypatch):
+    mem = Engram(
+        user_id="alice",
+        path=str(tmp_path),
+        embedder=StaticEmbedder(
+            mapping={
+                'entity.create {"attrs": {"location": "Busan"}, "id": "user:alice", "type": "user"} manual': [1.0, 0.0, 0.0],
+                'entity.create {"attrs": {"location": "Seoul"}, "id": "user:bob", "type": "user"} manual': [0.0, 1.0, 0.0],
+            }
+        ),
+    )
+    event_id = mem.append(
+        "entity.create",
+        {"id": "user:alice", "type": "user", "attrs": {"location": "Busan"}},
+        observed_at=dt("2026-05-01T10:00:00Z"),
+    )
+    other_event_id = mem.append(
+        "entity.create",
+        {"id": "user:bob", "type": "user", "attrs": {"location": "Seoul"}},
+        observed_at=dt("2026-05-01T10:05:00Z"),
+    )
+    mem.flush("index")
+
+    original_visible_events_known = mem.store.visible_events_known
+    captured_event_ids: list[list[str] | None] = []
+
+    def spy_visible_events_known(recorded_at, from_recorded_at=None, event_ids=None):
+        captured_event_ids.append(list(event_ids) if event_ids is not None else None)
+        return original_visible_events_known(recorded_at, from_recorded_at=from_recorded_at, event_ids=event_ids)
+
+    monkeypatch.setattr(mem.store, "visible_events_known", spy_visible_events_known)
+
+    results = mem.search("Busan", k=5)
+
+    assert results
+    assert results[0].entity_id == "user:alice"
+    assert captured_event_ids
+    assert captured_event_ids[0] is not None
+    assert captured_event_ids[0] == [event_id]
+    assert other_event_id not in captured_event_ids[0]
 
     mem.close()
 

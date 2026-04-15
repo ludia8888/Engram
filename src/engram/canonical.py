@@ -11,6 +11,7 @@ from .event_ops import (
     derive_event_entities,
     validate_event,
 )
+from .search_terms import event_search_terms
 from .storage.store import DirtyRangeRow, EventStore
 from .time_utils import to_rfc3339, utcnow
 from .types import Event, ExtractedEvent, ExtractionRun, QueueItem
@@ -102,6 +103,7 @@ class CanonicalWorker:
                     event_entities = derive_event_entities(event)
                     self.store.append_event(tx, event)
                     self.store.append_event_entities(tx, event.id, event_entities)
+                    self.store.append_event_search_terms(tx, event.id, event_search_terms(event))
                     dirty_rows.extend(derive_dirty_rows(event, event_entities))
                     dirty_rows.extend(
                         derive_cascade_dirty_rows_for_entity_event(

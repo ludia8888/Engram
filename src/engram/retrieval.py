@@ -1,46 +1,22 @@
 from __future__ import annotations
 
-import json
-import re
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
+from collections import OrderedDict
 from typing import Callable, Literal
 
+from .search_terms import QueryToken, event_search_text, query_candidate_terms, query_tokens
 from .semantic import Embedder, cosine_similarity
-from .storage.store import EventStore, covers_valid_time, overlaps_valid_time_window, valid_event_sort_key
+from .storage.store import (
+    EventStore,
+    RelationWindowQueryCache,
+    covers_valid_time,
+    overlaps_valid_time_window,
+    valid_event_sort_key,
+)
 from .time_utils import to_rfc3339, utcnow
 from .types import Event, SearchResult
-
-_TOKEN_RE = re.compile(r"[0-9A-Za-z가-힣:_-]+")
-_KOREAN_SUFFIXES = (
-    "으로는",
-    "으로도",
-    "으로",
-    "에서",
-    "에게",
-    "한테",
-    "이랑",
-    "처럼",
-    "까지",
-    "부터",
-    "보다",
-    "에는",
-    "에도",
-    "으로",
-    "은",
-    "는",
-    "이",
-    "가",
-    "을",
-    "를",
-    "와",
-    "과",
-    "로",
-    "도",
-    "만",
-    "야",
-)
 
 
 @dataclass(slots=True)
@@ -55,14 +31,7 @@ class ScoredEvent:
     def combined_score(self) -> float:
         return self.direct_score + self.causal_score
 
-
-@dataclass(frozen=True, slots=True)
-class QueryToken:
-    raw: str
-    variants: tuple[str, ...]
-
-
-VisibleEventsProvider = Callable[[tuple[datetime, datetime] | None], list[Event]]
+VisibleEventsProvider = Callable[[tuple[datetime, datetime] | None, list[str] | None], list[Event]]
 EventSortKey = Callable[[ScoredEvent], tuple]
 
 
@@ -70,12 +39,14 @@ _SEMANTIC_WEIGHT = 0.4
 _LEXICAL_WEIGHT = 0.6
 _SEMANTIC_MIN_SCORE = 0.35
 _CAUSAL_WEIGHT = 0.5
+_QUERY_EMBED_CACHE_SIZE = 128
 
 
 class RetrievalEngine:
     def __init__(self, store: EventStore, embedder: Embedder):
         self.store = store
         self.embedder = embedder
+        self._query_embedding_cache: OrderedDict[tuple[str, str], list[float]] = OrderedDict()
 
     def search_known(
         self,
@@ -99,13 +70,18 @@ class RetrievalEngine:
         *,
         k: int,
         time_window: tuple[datetime, datetime] | None = None,
+        relation_window_cache: RelationWindowQueryCache | None = None,
     ) -> list[SearchResult]:
         return self._search(
             query,
             k=k,
             time_mode="valid",
             time_window=time_window,
-            visible_events_provider=self._valid_visible_events,
+            visible_events_provider=lambda window, candidate_ids: self._valid_visible_events(
+                window,
+                candidate_ids,
+                relation_window_cache=relation_window_cache,
+            ),
             sort_key=lambda item: (-item.combined_score, *valid_event_sort_key(item.event)),
         )
 
@@ -122,19 +98,75 @@ class RetrievalEngine:
         if not query.strip():
             return []
 
-        tokens = _query_tokens(query)
-        events = visible_events_provider(time_window)
-        if not events:
-            return []
+        tokens = query_tokens(query)
+        lexical_candidate_ids = set(
+            self.store.candidate_event_ids_for_search_terms(query_candidate_terms(query))
+        )
+        direct_events: list[Event]
+        lexical_scores: dict[str, float]
+        if lexical_candidate_ids:
+            direct_events = visible_events_provider(time_window, sorted(lexical_candidate_ids))
+            if not direct_events:
+                return []
+            lexical_scores = {
+                event.id: (
+                    _score_event_lexical(event, tokens)
+                    if event.id in lexical_candidate_ids
+                    else 0.0
+                )
+                for event in direct_events
+            }
+            lexical_hit_event_ids = [
+                event.id
+                for event in direct_events
+                if lexical_scores.get(event.id, 0.0) > 0
+            ]
+            if lexical_hit_event_ids:
+                lexical_hit_entity_ids = sorted(
+                    {
+                        entity_id
+                        for entity_ids in self.store.event_entity_ids_for_events(
+                            lexical_hit_event_ids
+                        ).values()
+                        for entity_id in entity_ids
+                    }
+                )
+                semantic_candidate_ids = set(
+                    self.store.event_ids_with_embeddings_for_entities(
+                        lexical_hit_entity_ids,
+                        embedder_version=self.embedder.version,
+                    )
+                )
+                loaded_event_ids = {event.id for event in direct_events}
+                extra_semantic_ids = sorted(semantic_candidate_ids - loaded_event_ids)
+                if extra_semantic_ids:
+                    for event in visible_events_provider(time_window, extra_semantic_ids):
+                        if event.id in loaded_event_ids:
+                            continue
+                        direct_events.append(event)
+                        loaded_event_ids.add(event.id)
+                        lexical_scores[event.id] = 0.0
+            else:
+                semantic_candidate_ids = self.store.event_ids_with_embeddings(self.embedder.version)
+                if not semantic_candidate_ids:
+                    return []
+                direct_events = visible_events_provider(time_window, semantic_candidate_ids)
+                if not direct_events:
+                    return []
+                lexical_scores = {event.id: 0.0 for event in direct_events}
+        else:
+            semantic_candidate_ids = self.store.event_ids_with_embeddings(self.embedder.version)
+            if not semantic_candidate_ids:
+                return []
+            direct_events = visible_events_provider(time_window, semantic_candidate_ids)
+            if not direct_events:
+                return []
+            lexical_scores = {event.id: 0.0 for event in direct_events}
 
-        lexical_scores = {
-            event.id: _score_event_lexical(event, tokens)
-            for event in events
-        }
-        semantic_scores = self._semantic_scores(query, events)
+        semantic_scores = self._semantic_scores(query, direct_events)
 
         scored_events_by_id: dict[str, ScoredEvent] = {}
-        for event in events:
+        for event in direct_events:
             lexical_score = lexical_scores.get(event.id, 0.0)
             semantic_score = semantic_scores.get(event.id, 0.0)
             if semantic_score > 0:
@@ -158,7 +190,14 @@ class RetrievalEngine:
         if not scored_events_by_id:
             return []
 
-        visible_events_by_id = {event.id: event for event in events}
+        visible_events_by_id = {event.id: event for event in direct_events}
+        causal_candidate_ids = self._causal_candidate_event_ids(
+            seed_events=list(scored_events_by_id.values()),
+            loaded_event_ids=set(visible_events_by_id),
+        )
+        if causal_candidate_ids:
+            for event in visible_events_provider(time_window, causal_candidate_ids):
+                visible_events_by_id.setdefault(event.id, event)
         causal_scores = self._causal_scores(
             seed_events=list(scored_events_by_id.values()),
             visible_events_by_id=visible_events_by_id,
@@ -212,37 +251,46 @@ class RetrievalEngine:
         results.sort(key=lambda item: (-item.score, item.entity_id))
         return results[:k]
 
-    def _known_visible_events(self, time_window: tuple[datetime, datetime] | None) -> list[Event]:
+    def _known_visible_events(
+        self,
+        time_window: tuple[datetime, datetime] | None,
+        candidate_event_ids: list[str] | None,
+    ) -> list[Event]:
         upper_bound = time_window[1] if time_window else utcnow()
         lower_bound = time_window[0] if time_window else None
         events = self.store.visible_events_known(
             to_rfc3339(upper_bound),
             from_recorded_at=to_rfc3339(lower_bound) if lower_bound else None,
+            event_ids=candidate_event_ids,
         )
-        recorded_at = to_rfc3339(upper_bound)
-        return [
-            event
-            for event in events
-            if self.store.relation_event_is_live_known(event, recorded_at)
-        ]
+        return self.store.filter_relation_events_live_known(events, to_rfc3339(upper_bound))
 
-    def _valid_visible_events(self, time_window: tuple[datetime, datetime] | None) -> list[Event]:
-        visible_events = self.store.visible_events_valid()
+    def _valid_visible_events(
+        self,
+        time_window: tuple[datetime, datetime] | None,
+        candidate_event_ids: list[str] | None,
+        *,
+        relation_window_cache: RelationWindowQueryCache | None = None,
+    ) -> list[Event]:
+        visible_events = self.store.visible_events_valid(event_ids=candidate_event_ids)
         if time_window is None:
             as_of = utcnow()
-            return [
-                event
-                for event in visible_events
-                if covers_valid_time(event, as_of) and self.store.relation_event_is_live_valid(event, as_of)
-            ]
+            return self.store.filter_relation_events_live_valid_at(
+                [event for event in visible_events if covers_valid_time(event, as_of)],
+                as_of,
+            )
 
         start_at, end_at = time_window
-        return [
-            event
-            for event in visible_events
-            if overlaps_valid_time_window(event, start_at, end_at)
-            and self.store.relation_event_is_live_valid_in_window(event, start_at, end_at)
-        ]
+        return self.store.filter_relation_events_live_valid_in_window(
+            [
+                event
+                for event in visible_events
+                if overlaps_valid_time_window(event, start_at, end_at)
+            ],
+            start_at,
+            end_at,
+            query_cache=relation_window_cache,
+        )
 
     def _semantic_scores(self, query: str, events: list[Event]) -> dict[str, float]:
         event_embeddings = self.store.event_embeddings_for_ids(
@@ -252,12 +300,8 @@ class RetrievalEngine:
         if not event_embeddings:
             return {}
 
-        query_embedding = self.embedder.embed_texts([query])
-        if len(query_embedding) != 1:
-            raise ValueError(f"embedder returned {len(query_embedding)} query embeddings")
-
         scores: dict[str, float] = {}
-        query_vector = query_embedding[0]
+        query_vector = self._query_embedding(query)
         for event in events:
             event_vector = event_embeddings.get(event.id)
             if event_vector is None:
@@ -294,29 +338,47 @@ class RetrievalEngine:
                 scores[event.id] += causal_score
         return dict(scores)
 
+    def _causal_candidate_event_ids(
+        self,
+        *,
+        seed_events: list[ScoredEvent],
+        loaded_event_ids: set[str],
+    ) -> list[str]:
+        seed_ids = [scored.event.id for scored in seed_events if scored.direct_score > 0]
+        if not seed_ids:
+            return []
+        upstream_ids = {
+            scored.event.caused_by
+            for scored in seed_events
+            if scored.direct_score > 0 and scored.event.caused_by is not None
+        }
+        downstream_ids = set(self.store.event_ids_by_caused_by(seed_ids))
+        candidate_ids = (upstream_ids | downstream_ids) - loaded_event_ids
+        return sorted(candidate_ids)
 
-def _query_tokens(query: str) -> list[QueryToken]:
-    tokens: list[QueryToken] = []
-    for raw_token in _TOKEN_RE.findall(query):
-        token = raw_token.lower().strip()
-        if not token:
-            continue
-        variants = [token]
-        if _contains_hangul(token):
-            for suffix in _KOREAN_SUFFIXES:
-                if token.endswith(suffix):
-                    stem = token[: -len(suffix)]
-                    if len(stem) >= 2:
-                        variants.append(stem)
-        deduped = tuple(dict.fromkeys(variants))
-        tokens.append(QueryToken(raw=token, variants=deduped))
-    return tokens
+    def _query_embedding(self, query: str) -> list[float]:
+        normalized_query = query.strip().lower()
+        cache_key = (self.embedder.version, normalized_query)
+        cached = self._query_embedding_cache.get(cache_key)
+        if cached is not None:
+            self._query_embedding_cache.move_to_end(cache_key)
+            return cached
+
+        query_embedding = self.embedder.embed_texts([query])
+        if len(query_embedding) != 1:
+            raise ValueError(f"embedder returned {len(query_embedding)} query embeddings")
+        vector = query_embedding[0]
+        self._query_embedding_cache[cache_key] = vector
+        self._query_embedding_cache.move_to_end(cache_key)
+        while len(self._query_embedding_cache) > _QUERY_EMBED_CACHE_SIZE:
+            self._query_embedding_cache.popitem(last=False)
+        return vector
 
 
 def _score_event_lexical(event: Event, tokens: list[QueryToken]) -> float:
     if not tokens:
         return 0.0
-    haystack = _event_haystack(event)
+    haystack = event_search_text(event)
     matched = [
         token
         for token in tokens
@@ -330,17 +392,3 @@ def _score_event_lexical(event: Event, tokens: list[QueryToken]) -> float:
     if phrase and phrase in haystack:
         score += 0.25
     return score
-
-
-def _event_haystack(event: Event) -> str:
-    parts = [
-        event.type,
-        json.dumps(event.data, ensure_ascii=False, sort_keys=True),
-        event.reason or "",
-        event.source_role,
-    ]
-    return " ".join(parts).lower()
-
-
-def _contains_hangul(value: str) -> bool:
-    return any("\uac00" <= ch <= "\ud7a3" for ch in value)

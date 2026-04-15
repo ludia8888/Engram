@@ -585,11 +585,18 @@ CREATE TABLE vec_events (
     indexed_at         TEXT NOT NULL,
     PRIMARY KEY(event_id, embedder_version)
 );
+
+CREATE TABLE event_search_terms (
+    event_id           TEXT NOT NULL,
+    term               TEXT NOT NULL,
+    PRIMARY KEY(event_id, term)
+);
 ```
 
 주의:
-- `entity_fts`, `vec_events`는 canonical truth가 아니다.
+- `entity_fts`, `vec_events`, `event_search_terms`는 canonical truth가 아니다.
 - `vec_events`는 embedder version별로 다시 만들 수 있어야 한다.
+- `event_search_terms`는 lexical candidate narrowing용 보조 인덱스다.
 
 ### 6.3 Raw Log 저장 구조
 
@@ -723,7 +730,7 @@ def flush(
 - extractor가 event를 만들면 `extraction_runs`, `events`, `event_entities`, `dirty_ranges`가 함께 커밋된다.
 - 기본 extractor는 no-op이므로 `flush("canonical")`을 호출해도 event 없이 successful extraction run만 남는다.
 - `flush("projection")`은 `dirty_ranges`를 읽어 projector rebuild를 완료할 때까지 수행한다.
-- `flush("index")`는 현재 embedder version 기준으로 아직 인덱싱되지 않은 canonical event를 `vec_events`에 backfill한다.
+- `flush("index")`는 현재 embedder version 기준 `vec_events`와 lexical `event_search_terms`를 함께 최신화한다.
 - embedder version이 바뀌면 이전 vector row는 남겨두고, 검색은 현재 version row만 사용한다.
 - `OpenAIEmbedder`를 쓰더라도 `flush("index")`의 의미는 같다. 달라지는 건 현재 version row의 생성 방식뿐이다.
 - 즉 같은 model/dim이라도 backend identity나 `semantic_space_id`가 달라지면 새 version row를 다시 만들게 된다.
@@ -832,6 +839,7 @@ def context(
 - semantic 검색은 현재 embedder version의 `vec_events`만 사용한다.
 - semantic row가 없는 경우에도 검색은 lexical-only로 정상 동작한다.
 - `context()`는 `search()` 결과를 바탕으로 `Memory Basis / Current State / Relevant Changes / Raw Evidence` 섹션을 만든다.
+- `context()`는 현재 결과 entity들을 batch prefetch해서 entity view와 relation summary를 한 번에 계산한다.
 - relation event가 supporting event에 포함되면 source/target entity를 현재 상태 후보로 투영하고, active relation summary를 `Current State`에 함께 적는다.
 - relation event는 query의 mode/time 기준에서 양 endpoint entity가 모두 active일 때만 active relation seed로 취급한다.
 - `context(time_mode="valid", time_window=...)`의 relation summary는 `relations_active_in_window=...` 형식으로 표기하고, 구간 중 활성이라는 의미를 드러낸다.
@@ -1097,7 +1105,13 @@ query
 
 현재 구현된 최소형:
 - query token과 event `type/data/reason/source_role`의 lexical match로 seed event를 만든다.
+- lexical path는 먼저 `event_search_terms`로 lexical candidate event id를 좁힌다.
+- lexical candidate가 있으면 retrieval는 먼저 그 candidate만 visible event로 읽고 lexical seed를 만든다.
+- lexical seed가 나온 뒤 semantic 보강은 `current embedder version` row 중에서도 그 lexical-hit entity에 연결된 event들에만 넓힌다.
+- lexical candidate가 아예 없거나 lexical hit가 하나도 없을 때만 semantic-only path로 `current embedder version` row를 direct candidate로 읽는다.
+- causal neighbor는 direct seed가 정해진 뒤 필요한 event id만 추가로 읽는다.
 - `flush("index")`로 구축한 `vec_events`를 사용해 current embedder version 기준 semantic cosine score를 계산한다.
+- semantic query embedding은 `(embedder.version, normalized_query)` 기준의 작은 in-memory cache를 사용한다.
 - explicit `caused_by` 링크를 따라 상류 원인과 하류 결과를 1-hop causal expansion 한다.
 - 한국어 query는 조사/어미가 붙은 일부 어절에 대해 간단한 suffix normalization을 적용한다.
 - entity event와 relation event를 모두 seed로 사용하고, `event_entities`를 통해 relation의 source/target까지 entity 후보에 투영한다.
@@ -1109,6 +1123,7 @@ query
 - semantic row가 없는 이벤트는 lexical-only 후보로 남는다.
 - `OpenAIEmbedder`는 semantic 품질을 높이는 opt-in 선택지지만, 현재 검색 구조 자체를 가속하는 것은 아니다.
 - relation valid-window 검색은 correctness-first 구현이다. 현재는 visible event를 순회하면서 relation key/endpoint overlap을 Python helper로 계산하므로, relation 수가 많거나 window가 넓은 경우 이후 최적화 대상이 될 수 있다.
+- 다만 current 구현은 같은 query 안에서 relation valid-window interval cache와 source별 active relation key cache를 search/context가 재사용해, 반복 계산은 줄인다.
 - causal expansion은 현재 mode의 visible event 집합 안에서만 수행되고, same-batch alias 해석이나 heuristic causal 추론은 하지 않는다.
 
 ### 10.2 Run visibility 필터
