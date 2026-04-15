@@ -231,6 +231,7 @@ def test_context_valid_only_shows_relations_active_in_requested_window(tmp_path)
     )
 
     assert "relations_active_in_window" in before
+    assert "attrs_as_of_window_end" in before
     assert "manager -> user:bob" in before
     assert "manager -> user:bob" not in after
 

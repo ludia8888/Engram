@@ -76,6 +76,7 @@ class ExtractedEvent:
     data: dict[str, Any]
     effective_at_start: datetime | None = None
     effective_at_end: datetime | None = None
+    caused_by: str | None = None
     source_role: SourceRole = "user"
     confidence: float | None = None
     reason: str | None = None

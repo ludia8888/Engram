@@ -149,6 +149,13 @@ class EventStore:
             ).fetchone()
         return int(row[0])
 
+    def event_exists(self, event_id: str) -> bool:
+        row = self.conn.execute(
+            "SELECT 1 FROM events WHERE id = ? LIMIT 1",
+            (event_id,),
+        ).fetchone()
+        return row is not None
+
     def dirty_owner_ids(self) -> list[str]:
         rows = self.conn.execute(
             """
@@ -526,6 +533,20 @@ class EventStore:
             event_ids,
         ).fetchall()
         return [self._row_to_event(row) for row in rows]
+
+    def event_by_id(self, event_id: str) -> Event | None:
+        row = self.conn.execute(
+            """
+            SELECT *
+            FROM events
+            WHERE id = ?
+            LIMIT 1
+            """,
+            (event_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_event(row)
 
     def event_embeddings_for_ids(
         self,

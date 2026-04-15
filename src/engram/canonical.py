@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Protocol
 from uuid import uuid4
 
+from .errors import ValidationError
 from .event_ops import (
     derive_cascade_dirty_rows_for_entity_event,
     derive_dirty_rows,
@@ -48,6 +49,8 @@ class CanonicalWorker:
         try:
             for draft in drafts:
                 validate_event(draft.type, draft.data)
+                if draft.caused_by is not None and not self.store.event_exists(draft.caused_by):
+                    raise ValidationError(f"caused_by event not found: {draft.caused_by}")
             run_id = str(uuid4())
             active_runs = self.store.active_successful_runs_for_turn(item.turn_id)
             superseded_run_ids = [run.id for run in active_runs]
@@ -93,7 +96,7 @@ class CanonicalWorker:
                         confidence=draft.confidence,
                         reason=draft.reason,
                         time_confidence=draft.time_confidence,
-                        caused_by=None,
+                        caused_by=draft.caused_by,
                         schema_version=1,
                     )
                     event_entities = derive_event_entities(event)

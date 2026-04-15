@@ -92,6 +92,8 @@ class ContextBuilder:
                 f"- query: {query}",
             ]
         ]
+        if any("causal" in result.matched_axes for result in results):
+            sections[0].append("- causal_support: yes")
         if time_window is not None:
             sections[0].append(
                 f"- time_window: {to_rfc3339(time_window[0])}..{to_rfc3339(time_window[1])}"
@@ -101,6 +103,8 @@ class ContextBuilder:
         for result in results:
             view: TemporalEntityView | None = get_view(result.entity_id, basis_time)
             relation_summary_label = "relations"
+            attrs_label = "attrs"
+            unknown_attrs_label = "unknown_attrs"
             if time_window is not None and get_relations_in_window is not None:
                 relations: list[RelationEdge] = list(
                     get_relations_in_window(
@@ -110,6 +114,8 @@ class ContextBuilder:
                     )
                 )
                 relation_summary_label = "relations_active_in_window"
+                attrs_label = "attrs_as_of_window_end"
+                unknown_attrs_label = "unknown_attrs_as_of_window_end"
             else:
                 relations = list(get_relations(result.entity_id, basis_time))
             if view is None and not relations:
@@ -117,9 +123,9 @@ class ContextBuilder:
             entity_id = result.entity_id if view is None else view.entity_id
             entity_type = "unknown" if view is None else view.entity_type
             attrs = {} if view is None else view.attrs
-            line = f"- {entity_id} ({entity_type}) attrs={attrs}"
+            line = f"- {entity_id} ({entity_type}) {attrs_label}={attrs}"
             if view is not None and view.unknown_attrs:
-                line += f" unknown_attrs={view.unknown_attrs}"
+                line += f" {unknown_attrs_label}={view.unknown_attrs}"
             if relations:
                 line += f" {relation_summary_label}={_relation_summaries(relations)}"
             current_state.append(line)
@@ -128,23 +134,48 @@ class ContextBuilder:
 
         if include_history:
             change_lines = ["## Relevant Changes"]
+            supporting_by_id = {event.id: event for event in supporting_events}
+            downstream_by_id: dict[str, list[Event]] = {}
+            for event in supporting_events:
+                if event.caused_by is None:
+                    continue
+                downstream_by_id.setdefault(event.caused_by, []).append(event)
             for event in supporting_events:
                 time_label = _event_time_label(event, mode)
                 if event.type.startswith("relation."):
-                    change_lines.append(_describe_relation_event(event, time_label))
+                    change_lines.append(
+                        _describe_relation_event(
+                            event,
+                            time_label,
+                            cause_event=supporting_by_id.get(event.caused_by) if event.caused_by else None,
+                            downstream_events=downstream_by_id.get(event.id, []),
+                        )
+                    )
                     continue
                 if event.type == "entity.delete":
+                    line = f"- {event.data['id']} deleted {time_label}"
                     change_lines.append(
-                        f"- {event.data['id']} deleted {time_label}"
+                        _append_causal_note(
+                            line,
+                            cause_event=supporting_by_id.get(event.caused_by) if event.caused_by else None,
+                            downstream_events=downstream_by_id.get(event.id, []),
+                        )
                     )
                     continue
                 attrs = event.data.get("attrs", {})
                 if not attrs:
                     continue
-                change_lines.append(
+                line = (
                     f"- {event.data['id']} {attrs} {time_label} "
                     f"confidence={event.confidence if event.confidence is not None else 'unknown'} "
                     f"reason={event.reason or 'n/a'}"
+                )
+                change_lines.append(
+                    _append_causal_note(
+                        line,
+                        cause_event=supporting_by_id.get(event.caused_by) if event.caused_by else None,
+                        downstream_events=downstream_by_id.get(event.id, []),
+                    )
                 )
             if len(change_lines) > 1:
                 sections.append(change_lines)
@@ -214,18 +245,65 @@ def _relation_summaries(relations: list[RelationEdge]) -> list[str]:
     return summaries
 
 
-def _describe_relation_event(event: Event, time_label: str) -> str:
+def _describe_relation_event(
+    event: Event,
+    time_label: str,
+    *,
+    cause_event: Event | None = None,
+    downstream_events: list[Event] | None = None,
+) -> str:
     source = event.data["source"]
     target = event.data["target"]
     relation_type = event.data["type"]
     if event.type == "relation.delete":
-        return f"- relation {source} -[{relation_type}]-> {target} deleted {time_label}"
+        line = f"- relation {source} -[{relation_type}]-> {target} deleted {time_label}"
+        return _append_causal_note(
+            line,
+            cause_event=cause_event,
+            downstream_events=downstream_events or [],
+        )
     attrs = event.data.get("attrs", {})
-    return (
+    line = (
         f"- relation {source} -[{relation_type}]-> {target} attrs={attrs} {time_label} "
         f"confidence={event.confidence if event.confidence is not None else 'unknown'} "
         f"reason={event.reason or 'n/a'}"
     )
+    return _append_causal_note(
+        line,
+        cause_event=cause_event,
+        downstream_events=downstream_events or [],
+    )
+
+
+def _append_causal_note(
+    line: str,
+    *,
+    cause_event: Event | None,
+    downstream_events: list[Event],
+) -> str:
+    notes: list[str] = []
+    if cause_event is not None:
+        notes.append(f"caused by: {_event_brief(cause_event)}")
+    if downstream_events:
+        led_to = ", ".join(_event_brief(event) for event in downstream_events[:2])
+        notes.append(f"led to: {led_to}")
+    if not notes:
+        return line
+    return f"{line} {'; '.join(notes)}"
+
+
+def _event_brief(event: Event) -> str:
+    if event.type.startswith("relation."):
+        source = event.data["source"]
+        target = event.data["target"]
+        relation_type = event.data["type"]
+        if event.type == "relation.delete":
+            return f"relation {source} -[{relation_type}]-> {target} deleted"
+        attrs = event.data.get("attrs", {})
+        return f"relation {source} -[{relation_type}]-> {target} attrs={attrs}"
+    if event.type == "entity.delete":
+        return f"{event.data['id']} deleted"
+    return f"{event.data['id']} {event.data.get('attrs', {})}"
 
 
 def _truncate_sections(sections: list[list[str]], max_tokens: int) -> str:

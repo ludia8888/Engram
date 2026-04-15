@@ -121,6 +121,7 @@ class Engram:
         effective_at_end=None,
         source_role: str = "manual",
         source_turn_id: str | None = None,
+        caused_by: str | None = None,
         confidence: float | None = None,
         reason: str | None = None,
         time_confidence: str = "unknown",
@@ -129,6 +130,8 @@ class Engram:
         effective_start = ensure_utc(effective_at_start, "effective_at_start") if effective_at_start else None
         effective_end = ensure_utc(effective_at_end, "effective_at_end") if effective_at_end else None
         validate_event(event_type, data)
+        if caused_by is not None and not self.store.event_exists(caused_by):
+            raise ValidationError(f"caused_by event not found: {caused_by}")
 
         with self.store.transaction() as tx:
             recorded_at = utcnow()
@@ -147,7 +150,7 @@ class Engram:
                 confidence=confidence,
                 reason=reason,
                 time_confidence=time_confidence,
-                caused_by=None,
+                caused_by=caused_by,
                 schema_version=1,
             )
             event_entities = derive_event_entities(event)

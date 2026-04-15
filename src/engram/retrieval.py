@@ -48,7 +48,12 @@ class ScoredEvent:
     event: Event
     lexical_score: float
     semantic_score: float
-    combined_score: float
+    direct_score: float
+    causal_score: float = 0.0
+
+    @property
+    def combined_score(self) -> float:
+        return self.direct_score + self.causal_score
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,6 +69,7 @@ EventSortKey = Callable[[ScoredEvent], tuple]
 _SEMANTIC_WEIGHT = 0.4
 _LEXICAL_WEIGHT = 0.6
 _SEMANTIC_MIN_SCORE = 0.35
+_CAUSAL_WEIGHT = 0.5
 
 
 class RetrievalEngine:
@@ -127,33 +133,51 @@ class RetrievalEngine:
         }
         semantic_scores = self._semantic_scores(query, events)
 
-        scored_events: list[ScoredEvent] = []
+        scored_events_by_id: dict[str, ScoredEvent] = {}
         for event in events:
             lexical_score = lexical_scores.get(event.id, 0.0)
             semantic_score = semantic_scores.get(event.id, 0.0)
             if semantic_score > 0:
-                combined = (
+                direct_score = (
                     (_LEXICAL_WEIGHT * lexical_score if lexical_score > 0 else 0.0)
                     + (_SEMANTIC_WEIGHT * semantic_score if semantic_score > 0 else 0.0)
                 )
             else:
-                combined = lexical_score
+                direct_score = lexical_score
             if lexical_score <= 0 and semantic_score <= 0:
                 continue
-            if combined <= 0:
+            if direct_score <= 0:
                 continue
-            scored_events.append(
-                ScoredEvent(
-                    event=event,
-                    lexical_score=lexical_score,
-                    semantic_score=semantic_score,
-                    combined_score=combined,
-                )
+            scored_events_by_id[event.id] = ScoredEvent(
+                event=event,
+                lexical_score=lexical_score,
+                semantic_score=semantic_score,
+                direct_score=direct_score,
             )
 
-        if not scored_events:
+        if not scored_events_by_id:
             return []
 
+        visible_events_by_id = {event.id: event for event in events}
+        causal_scores = self._causal_scores(
+            seed_events=list(scored_events_by_id.values()),
+            visible_events_by_id=visible_events_by_id,
+        )
+        for event_id, score in causal_scores.items():
+            if event_id in scored_events_by_id:
+                continue
+            event = visible_events_by_id.get(event_id)
+            if event is None:
+                continue
+            scored_events_by_id[event_id] = ScoredEvent(
+                event=event,
+                lexical_score=0.0,
+                semantic_score=0.0,
+                direct_score=0.0,
+                causal_score=score,
+            )
+
+        scored_events = list(scored_events_by_id.values())
         event_entities = self.store.event_entity_ids_for_events([scored.event.id for scored in scored_events])
         entity_scores: dict[str, float] = defaultdict(float)
         entity_event_scores: dict[str, list[ScoredEvent]] = defaultdict(list)
@@ -166,9 +190,13 @@ class RetrievalEngine:
         results: list[SearchResult] = []
         for entity_id, total_score in entity_scores.items():
             ranked_events = sorted(entity_event_scores[entity_id], key=sort_key)
-            matched_axes: set[str] = {"entity"}
+            matched_axes: set[str] = set()
+            if any(item.direct_score > 0 for item in ranked_events):
+                matched_axes.add("entity")
             if any(item.semantic_score > 0 for item in ranked_events):
                 matched_axes.add("semantic")
+            if any(item.causal_score > 0 for item in ranked_events):
+                matched_axes.add("causal")
             if time_window is not None:
                 matched_axes.add("temporal")
             results.append(
@@ -238,6 +266,33 @@ class RetrievalEngine:
             if score >= _SEMANTIC_MIN_SCORE:
                 scores[event.id] = score
         return scores
+
+    def _causal_scores(
+        self,
+        *,
+        seed_events: list[ScoredEvent],
+        visible_events_by_id: dict[str, Event],
+    ) -> dict[str, float]:
+        downstream_by_id: dict[str, list[Event]] = defaultdict(list)
+        for event in visible_events_by_id.values():
+            if event.caused_by is None:
+                continue
+            if event.caused_by not in visible_events_by_id:
+                continue
+            downstream_by_id[event.caused_by].append(event)
+
+        scores: dict[str, float] = defaultdict(float)
+        for scored in seed_events:
+            if scored.direct_score <= 0:
+                continue
+            causal_score = scored.direct_score * _CAUSAL_WEIGHT
+            if causal_score <= 0:
+                continue
+            if scored.event.caused_by is not None and scored.event.caused_by in visible_events_by_id:
+                scores[scored.event.caused_by] += causal_score
+            for event in downstream_by_id.get(scored.event.id, []):
+                scores[event.id] += causal_score
+        return dict(scores)
 
 
 def _query_tokens(query: str) -> list[QueryToken]:

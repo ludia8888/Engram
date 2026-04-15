@@ -286,7 +286,7 @@ def test_context_builds_valid_time_memory_summary(tmp_path):
     assert "## Current State" in text
     assert "user:alice" in text
     assert "vegetarian" in text
-    assert "unknown_attrs=['location']" in text
+    assert "unknown_attrs_as_of_window_end=['location']" in text
     assert "## Relevant Changes" in text
     assert "effective_at=2026-05-01T00:00:00Z" in text
     assert "## Raw Evidence" in text

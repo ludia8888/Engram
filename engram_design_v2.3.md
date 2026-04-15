@@ -682,6 +682,7 @@ def append(
     effective_at_end: datetime | None = None,
     source_role: Literal["user", "assistant", "tool", "system", "manual"] = "manual",
     source_turn_id: str | None = None,
+    caused_by: str | None = None,
     confidence: float | None = None,
     reason: str | None = None,
     time_confidence: Literal["exact", "inferred", "unknown"] = "unknown",
@@ -694,6 +695,7 @@ def append(
 - queue enqueue가 실패해도 raw append가 성공했다면 `turn()`은 예외 대신 `TurnAck(..., queued=False)`를 반환한다.
 - `append()`는 L1 canonical commit을 동기 수행한다.
 - 현재 런타임에서 `append()`가 허용하는 structured 이벤트는 `entity.create`, `entity.update`, `entity.delete`, `relation.create`, `relation.update`, `relation.delete`다.
+- `append()`는 `caused_by`가 주어지면 해당 event id가 이미 canonical store에 존재할 때만 허용한다.
 - relation 전용 public read API는 아직 없지만, relation 이벤트는 canonical replay, `search()`, `context()`, projector rebuild에 반영된다.
 - `relation.update`는 prior `relation.create`가 없어도 active relation을 만든 것으로 해석한다.
 - `valid` + `time_window=(start, end)`에서 relation은 `end` 시점 active가 아니라 `[start, end)` 구간 중 한 번이라도 active였으면 후보로 포함된다.
@@ -754,7 +756,7 @@ Status:
 - `search(..., time_mode="valid")` = `Implemented (Phase 4 PR2)`
 - `context(..., time_mode="valid")` = `Implemented (Phase 4 PR2)`
 - semantic ranking = `Implemented (Phase 3 PR2)`
-- causal ranking = `Planned (Phase 3+)`
+- causal ranking = `Implemented (Phase 6 PR1)`
 
 ```python
 def search(
@@ -783,8 +785,8 @@ def context(
 현재 구현 규칙:
 - `search()`는 canonical 이벤트를 직접 읽는 event-seeded retrieval이다.
 - lexical 점수와 semantic cosine 점수를 함께 사용한다.
-- 지원 축은 현재 `entity`, optional `semantic`, optional `temporal`다.
-- `causal` 축은 아직 결과 집계에 포함되지 않는다.
+- explicit causal 1-hop expansion을 함께 사용한다.
+- 지원 축은 현재 `entity`, optional `semantic`, optional `temporal`, optional `causal`다.
 - `time_mode="known"`는 `recorded_at` 기준 lexical retrieval이다.
 - `time_mode="valid"`는 `effective_at_*` 기준 lexical retrieval이다.
 - `time_mode="valid"`에서는 `effective_at_start`가 없는 이벤트를 seed에서 제외한다.
@@ -794,7 +796,8 @@ def context(
 - relation event가 supporting event에 포함되면 source/target entity를 현재 상태 후보로 투영하고, active relation summary를 `Current State`에 함께 적는다.
 - relation event는 query의 mode/time 기준에서 양 endpoint entity가 모두 active일 때만 active relation seed로 취급한다.
 - `context(time_mode="valid", time_window=...)`의 relation summary는 `relations_active_in_window=...` 형식으로 표기하고, 구간 중 활성이라는 의미를 드러낸다.
-- 현재 구현에서 `context(time_mode="valid", time_window=...)`의 entity attrs는 여전히 `as_of=end_at` 기준 `get_valid_at()` 결과를 사용한다. 즉 한 줄 안에 `end_at` 시점 entity attrs와 `구간 중 활성` relation summary가 함께 보일 수 있다.
+- 같은 경우 entity attrs는 `attrs_as_of_window_end=...` / `unknown_attrs_as_of_window_end=...`로 표기한다. 즉 현재 구현은 relation은 window semantics, entity attrs는 `end_at` semantics를 쓰되, 출력 라벨에서 그 차이를 드러낸다.
+- causal supporting event가 있으면 `Memory Basis`에 그 사실을 표시하고, `Relevant Changes`에는 `caused by:` / `led to:` 설명을 함께 렌더링한다.
 - `include_raw=True`일 때만 `source_turn_id`를 따라 raw evidence를 붙인다.
 - `context(time_mode="valid")`는 `Current State`에 `unknown_attrs`를 함께 노출한다.
 - `Relevant Changes`는 entity attr 변경뿐 아니라 relation create/update/delete도 문장으로 렌더링한다.
@@ -1018,6 +1021,7 @@ query
 현재 구현된 최소형:
 - query token과 event `type/data/reason/source_role`의 lexical match로 seed event를 만든다.
 - `flush("index")`로 구축한 `vec_events`를 사용해 current embedder version 기준 semantic cosine score를 계산한다.
+- explicit `caused_by` 링크를 따라 상류 원인과 하류 결과를 1-hop causal expansion 한다.
 - 한국어 query는 조사/어미가 붙은 일부 어절에 대해 간단한 suffix normalization을 적용한다.
 - entity event와 relation event를 모두 seed로 사용하고, `event_entities`를 통해 relation의 source/target까지 entity 후보에 투영한다.
 - 결과는 entity별 supporting event 집합으로 반환한다.
@@ -1027,6 +1031,7 @@ query
 - `valid` mode는 `effective_at_start`가 없는 이벤트를 검색 seed에서 제외하고, 불확실성은 `context()`의 `unknown_attrs`에서 보완한다.
 - semantic row가 없는 이벤트는 lexical-only 후보로 남는다.
 - relation valid-window 검색은 correctness-first 구현이다. 현재는 visible event를 순회하면서 relation key/endpoint overlap을 Python helper로 계산하므로, relation 수가 많거나 window가 넓은 경우 이후 최적화 대상이 될 수 있다.
+- causal expansion은 현재 mode의 visible event 집합 안에서만 수행되고, same-batch alias 해석이나 heuristic causal 추론은 하지 않는다.
 
 ### 10.2 Run visibility 필터
 
@@ -1061,12 +1066,15 @@ query
 ```text
 event_score = lexical_score only
           or 0.6 * lexical_score + 0.4 * semantic_score
+causal_score = seed_event_score * 0.5
 entity_score = Σ supporting_event_scores
 ```
 
 정규화 원칙:
 - 현재 semantic은 cosine similarity를 0~1 범위로 clamp하여 사용한다
 - current embedder version의 semantic row가 하나도 없으면 lexical-only 결과를 그대로 사용한다
+- causal은 direct lexical/semantic seed가 있는 이벤트 주변만 1-hop 확장하고, causal-only 이벤트는 `causal_score`로만 점수를 받는다
+- 이미 direct lexical/semantic seed로 들어온 이벤트는 causal 때문에 추가 가중치를 받지 않는다
 - `matched_axes`를 결과에 남겨 디버깅 가능하게 한다
 
 ### 10.5 event_entities의 역할
