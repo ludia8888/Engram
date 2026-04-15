@@ -8,7 +8,13 @@ from typing import Callable, Literal
 
 from .search_terms import QueryToken, event_search_text, query_candidate_terms, query_tokens
 from .semantic import Embedder, cosine_similarity
-from .storage.store import EventStore, covers_valid_time, overlaps_valid_time_window, valid_event_sort_key
+from .storage.store import (
+    EventStore,
+    RelationWindowQueryCache,
+    covers_valid_time,
+    overlaps_valid_time_window,
+    valid_event_sort_key,
+)
 from .time_utils import to_rfc3339, utcnow
 from .types import Event, SearchResult
 
@@ -64,13 +70,18 @@ class RetrievalEngine:
         *,
         k: int,
         time_window: tuple[datetime, datetime] | None = None,
+        relation_window_cache: RelationWindowQueryCache | None = None,
     ) -> list[SearchResult]:
         return self._search(
             query,
             k=k,
             time_mode="valid",
             time_window=time_window,
-            visible_events_provider=self._valid_visible_events,
+            visible_events_provider=lambda window, candidate_ids: self._valid_visible_events(
+                window,
+                candidate_ids,
+                relation_window_cache=relation_window_cache,
+            ),
             sort_key=lambda item: (-item.combined_score, *valid_event_sort_key(item.event)),
         )
 
@@ -213,6 +224,8 @@ class RetrievalEngine:
         self,
         time_window: tuple[datetime, datetime] | None,
         candidate_event_ids: list[str] | None,
+        *,
+        relation_window_cache: RelationWindowQueryCache | None = None,
     ) -> list[Event]:
         visible_events = self.store.visible_events_valid(event_ids=candidate_event_ids)
         if time_window is None:
@@ -231,6 +244,7 @@ class RetrievalEngine:
             ],
             start_at,
             end_at,
+            query_cache=relation_window_cache,
         )
 
     def _semantic_scores(self, query: str, events: list[Event]) -> dict[str, float]:

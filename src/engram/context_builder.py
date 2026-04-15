@@ -23,8 +23,8 @@ class ContextBuilder:
         max_tokens: int,
         include_history: bool,
         include_raw: bool,
-        get_known_at,
-        get_known_relations_at,
+        views_by_entity: dict[str, TemporalEntityView | None],
+        relations_by_entity: dict[str, list[RelationEdge]],
     ) -> str:
         return self._build(
             mode="known",
@@ -35,8 +35,8 @@ class ContextBuilder:
             max_tokens=max_tokens,
             include_history=include_history,
             include_raw=include_raw,
-            get_view=get_known_at,
-            get_relations=get_known_relations_at,
+            views_by_entity=views_by_entity,
+            relations_by_entity=relations_by_entity,
         )
 
     def build_valid(
@@ -49,9 +49,8 @@ class ContextBuilder:
         max_tokens: int,
         include_history: bool,
         include_raw: bool,
-        get_valid_at,
-        get_valid_relations_at,
-        get_valid_relations_in_window,
+        views_by_entity: dict[str, TemporalEntityView | None],
+        relations_by_entity: dict[str, list[RelationEdge]],
     ) -> str:
         return self._build(
             mode="valid",
@@ -62,9 +61,8 @@ class ContextBuilder:
             max_tokens=max_tokens,
             include_history=include_history,
             include_raw=include_raw,
-            get_view=get_valid_at,
-            get_relations=get_valid_relations_at,
-            get_relations_in_window=get_valid_relations_in_window,
+            views_by_entity=views_by_entity,
+            relations_by_entity=relations_by_entity,
         )
 
     def _build(
@@ -78,9 +76,8 @@ class ContextBuilder:
         max_tokens: int,
         include_history: bool,
         include_raw: bool,
-        get_view,
-        get_relations,
-        get_relations_in_window=None,
+        views_by_entity: dict[str, TemporalEntityView | None],
+        relations_by_entity: dict[str, list[RelationEdge]],
     ) -> str:
         basis_time = as_of or utcnow()
         supporting_events = self.store.events_by_ids(_supporting_event_ids(results))
@@ -101,23 +98,17 @@ class ContextBuilder:
 
         current_state = ["## Current State"]
         for result in results:
-            view: TemporalEntityView | None = get_view(result.entity_id, basis_time)
+            view = views_by_entity.get(result.entity_id)
             relation_summary_label = "relations"
             attrs_label = "attrs"
             unknown_attrs_label = "unknown_attrs"
-            if time_window is not None and get_relations_in_window is not None:
-                relations: list[RelationEdge] = list(
-                    get_relations_in_window(
-                        result.entity_id,
-                        time_window[0],
-                        time_window[1],
-                    )
-                )
+            if mode == "valid" and time_window is not None:
+                relations = list(relations_by_entity.get(result.entity_id, []))
                 relation_summary_label = "relations_active_in_window"
                 attrs_label = "attrs_as_of_window_end"
                 unknown_attrs_label = "unknown_attrs_as_of_window_end"
             else:
-                relations = list(get_relations(result.entity_id, basis_time))
+                relations = list(relations_by_entity.get(result.entity_id, []))
             if view is None and not relations:
                 continue
             entity_id = result.entity_id if view is None else view.entity_id

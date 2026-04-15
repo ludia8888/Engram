@@ -293,3 +293,104 @@ def test_context_builds_valid_time_memory_summary(tmp_path):
     assert "나는 채식주의자고" in text
 
     mem.close()
+
+
+def test_batch_known_helpers_match_single_entity_reads(tmp_path):
+    mem = Engram(user_id="alice", path=str(tmp_path))
+    mem.append(
+        "entity.create",
+        {"id": "user:alice", "type": "user", "attrs": {"location": "Busan"}},
+        observed_at=dt("2026-05-01T10:00:00Z"),
+        reason="moved to Busan",
+    )
+    mem.append(
+        "entity.create",
+        {"id": "user:bob", "type": "user", "attrs": {"location": "Seoul"}},
+        observed_at=dt("2026-05-01T10:05:00Z"),
+    )
+    mem.append(
+        "relation.create",
+        {
+            "source": "user:alice",
+            "target": "user:bob",
+            "type": "manager",
+            "attrs": {"scope": "engram"},
+        },
+        observed_at=dt("2026-05-01T10:06:00Z"),
+    )
+
+    at = dt("2026-05-02T00:00:00Z")
+    views = mem._get_known_views_at_many(["user:alice", "user:bob"], at)
+    relations = mem._get_known_relations_at_many(["user:alice", "user:bob"], at)
+
+    assert views["user:alice"] == mem.get_known_at("user:alice", at)
+    assert views["user:bob"] == mem.get_known_at("user:bob", at)
+    assert relations["user:alice"] == mem.get_relations("user:alice", time_mode="known", at=at)
+    assert relations["user:bob"] == mem.get_relations("user:bob", time_mode="known", at=at)
+
+    mem.close()
+
+
+def test_batch_valid_helpers_match_single_entity_reads(tmp_path):
+    mem = Engram(user_id="alice", path=str(tmp_path))
+    mem.append(
+        "entity.create",
+        {"id": "user:alice", "type": "user", "attrs": {"location": "Seoul"}},
+        observed_at=dt("2026-05-01T10:00:00Z"),
+        effective_at_start=dt("2026-05-01T00:00:00Z"),
+        time_confidence="exact",
+    )
+    mem.append(
+        "entity.update",
+        {"id": "user:alice", "attrs": {"location": "Busan"}},
+        observed_at=dt("2026-05-05T10:00:00Z"),
+        effective_at_start=dt("2026-05-05T00:00:00Z"),
+        time_confidence="exact",
+    )
+    mem.append(
+        "entity.create",
+        {"id": "user:bob", "type": "user", "attrs": {"team": "engram"}},
+        observed_at=dt("2026-05-01T10:05:00Z"),
+        effective_at_start=dt("2026-05-01T00:00:00Z"),
+        time_confidence="exact",
+    )
+    mem.append(
+        "relation.create",
+        {
+            "source": "user:alice",
+            "target": "user:bob",
+            "type": "manager",
+            "attrs": {"scope": "engram"},
+        },
+        observed_at=dt("2026-05-05T10:06:00Z"),
+        effective_at_start=dt("2026-05-05T00:00:00Z"),
+        time_confidence="exact",
+    )
+
+    at = dt("2026-05-06T00:00:00Z")
+    views = mem._get_valid_views_at_many(["user:alice", "user:bob"], at)
+    relations = mem._get_valid_relations_at_many(["user:alice", "user:bob"], at)
+
+    assert views["user:alice"] == mem.get_valid_at("user:alice", at)
+    assert views["user:bob"] == mem.get_valid_at("user:bob", at)
+    assert relations["user:alice"] == mem.get_relations("user:alice", time_mode="valid", at=at)
+    assert relations["user:bob"] == mem.get_relations("user:bob", time_mode="valid", at=at)
+
+    window_relations = mem._get_valid_relations_in_window_many(
+        ["user:alice", "user:bob"],
+        dt("2026-05-04T00:00:00Z"),
+        dt("2026-05-07T00:00:00Z"),
+    )
+
+    assert window_relations["user:alice"] == mem.get_relations(
+        "user:alice",
+        time_mode="valid",
+        time_window=(dt("2026-05-04T00:00:00Z"), dt("2026-05-07T00:00:00Z")),
+    )
+    assert window_relations["user:bob"] == mem.get_relations(
+        "user:bob",
+        time_mode="valid",
+        time_window=(dt("2026-05-04T00:00:00Z"), dt("2026-05-07T00:00:00Z")),
+    )
+
+    mem.close()

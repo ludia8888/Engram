@@ -48,7 +48,7 @@ def main() -> None:
             repeat=20,
         )
         semantic_repeat_elapsed = _measure(
-            lambda: mem.search("Busan-1499 traveler", k=5),
+            lambda: mem.search("travel partner", k=5),
             repeat=20,
         )
         valid_relation_elapsed = _measure(
@@ -60,11 +60,26 @@ def main() -> None:
             ),
             repeat=20,
         )
+        known_context_elapsed = _measure(
+            lambda: mem.context("Busan-1499 traveler", max_tokens=400),
+            repeat=20,
+        )
+        valid_context_elapsed = _measure(
+            lambda: mem.context(
+                "teammate engram",
+                time_mode="valid",
+                time_window=(dt(base), dt(base + timedelta(days=3))),
+                max_tokens=400,
+            ),
+            repeat=20,
+        )
 
         print("Search latency benchmark")
         print(f"known lexical search: {known_elapsed:.4f}s total / 20 runs")
         print(f"repeated semantic-capable search: {semantic_repeat_elapsed:.4f}s total / 20 runs")
         print(f"valid relation-window search: {valid_relation_elapsed:.4f}s total / 20 runs")
+        print(f"known context build: {known_context_elapsed:.4f}s total / 20 runs")
+        print(f"valid window context build: {valid_context_elapsed:.4f}s total / 20 runs")
         mem.close()
 
 

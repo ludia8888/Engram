@@ -500,7 +500,21 @@ class Engram:
         include_raw: bool = False,
     ) -> str:
         as_of = time_window[1] if time_window else utcnow()
-        results = self.search(query, time_mode=time_mode, time_window=time_window, k=5)
+        relation_window_cache = None
+        if time_mode == "valid" and time_window is not None:
+            relation_window_cache = self.store.build_relation_window_query_cache(
+                ensure_utc(time_window[0], "time_window[0]"),
+                ensure_utc(time_window[1], "time_window[1]"),
+            )
+            results = self.retrieval.search_valid(
+                query,
+                k=5,
+                time_window=time_window,
+                relation_window_cache=relation_window_cache,
+            )
+        else:
+            results = self.search(query, time_mode=time_mode, time_window=time_window, k=5)
+        entity_ids = [result.entity_id for result in results]
         if time_mode == "known":
             return self.context_builder.build_known(
                 query=query,
@@ -509,10 +523,20 @@ class Engram:
                 max_tokens=max_tokens,
                 include_history=include_history,
                 include_raw=include_raw,
-                get_known_at=self.get_known_at,
-                get_known_relations_at=self._get_known_relations_at,
+                views_by_entity=self._get_known_views_at_many(entity_ids, as_of),
+                relations_by_entity=self._get_known_relations_at_many(entity_ids, as_of),
             )
         if time_mode == "valid":
+            valid_at = ensure_utc(as_of, "as_of")
+            if time_window is not None:
+                relations_by_entity = self._get_valid_relations_in_window_many(
+                    entity_ids,
+                    time_window[0],
+                    time_window[1],
+                    relation_window_cache=relation_window_cache,
+                )
+            else:
+                relations_by_entity = self._get_valid_relations_at_many(entity_ids, valid_at)
             return self.context_builder.build_valid(
                 query=query,
                 results=results,
@@ -521,9 +545,8 @@ class Engram:
                 max_tokens=max_tokens,
                 include_history=include_history,
                 include_raw=include_raw,
-                get_valid_at=self.get_valid_at,
-                get_valid_relations_at=self._get_valid_relations_at,
-                get_valid_relations_in_window=self._get_valid_relations_in_window,
+                views_by_entity=self._get_valid_views_at_many(entity_ids, valid_at),
+                relations_by_entity=relations_by_entity,
             )
         raise ValidationError(f"unsupported time_mode: {time_mode}")
 
@@ -555,9 +578,57 @@ class Engram:
         target = ensure_utc(at, "at")
         return self.store.relation_edges_known_at(entity_id, to_rfc3339(target))
 
+    def _get_known_views_at_many(self, entity_ids: list[str], at) -> dict[str, TemporalEntityView | None]:
+        target = ensure_utc(at, "at")
+        folded_by_entity = self.store.fold_entities_known_at(entity_ids, to_rfc3339(target))
+        views: dict[str, TemporalEntityView | None] = {}
+        for entity_id in entity_ids:
+            folded = folded_by_entity.get(entity_id)
+            if folded is None:
+                views[entity_id] = None
+                continue
+            views[entity_id] = TemporalEntityView(
+                entity_id=folded.entity_id,
+                entity_type=folded.entity_type,
+                attrs=dict(folded.attrs),
+                unknown_attrs=[],
+                supporting_event_ids=list(folded.supporting_event_ids),
+                basis="known",
+                as_of=target,
+            )
+        return views
+
+    def _get_known_relations_at_many(self, entity_ids: list[str], at) -> dict[str, list[RelationEdge]]:
+        target = ensure_utc(at, "at")
+        return self.store.relation_edges_known_at_many(entity_ids, to_rfc3339(target))
+
     def _get_valid_relations_at(self, entity_id: str, at) -> list[RelationEdge]:
         target = ensure_utc(at, "at")
         return self.store.relation_edges_valid_at(entity_id, target)
+
+    def _get_valid_views_at_many(self, entity_ids: list[str], at) -> dict[str, TemporalEntityView | None]:
+        target = ensure_utc(at, "at")
+        folded_by_entity = self.store.fold_entities_valid_at(entity_ids, target)
+        views: dict[str, TemporalEntityView | None] = {}
+        for entity_id in entity_ids:
+            folded = folded_by_entity.get(entity_id)
+            if folded is None:
+                views[entity_id] = None
+                continue
+            views[entity_id] = TemporalEntityView(
+                entity_id=folded.entity_id,
+                entity_type=folded.entity_type,
+                attrs=dict(folded.attrs),
+                unknown_attrs=list(folded.unknown_attrs),
+                supporting_event_ids=list(folded.supporting_event_ids),
+                basis="valid",
+                as_of=target,
+            )
+        return views
+
+    def _get_valid_relations_at_many(self, entity_ids: list[str], at) -> dict[str, list[RelationEdge]]:
+        target = ensure_utc(at, "at")
+        return self.store.relation_edges_valid_at_many(entity_ids, target)
 
     def _get_valid_relations_in_window(
         self,
@@ -570,3 +641,22 @@ class Engram:
         if start >= end:
             return []
         return self.store.relation_edges_valid_in_window(entity_id, start, end)
+
+    def _get_valid_relations_in_window_many(
+        self,
+        entity_ids: list[str],
+        start_at,
+        end_at,
+        *,
+        relation_window_cache=None,
+    ) -> dict[str, list[RelationEdge]]:
+        start = ensure_utc(start_at, "start_at")
+        end = ensure_utc(end_at, "end_at")
+        if start >= end:
+            return {entity_id: [] for entity_id in entity_ids}
+        return self.store.relation_edges_valid_in_window_many(
+            entity_ids,
+            start,
+            end,
+            query_cache=relation_window_cache,
+        )

@@ -36,6 +36,13 @@ class FoldedValidEntityState:
     active: bool
 
 
+@dataclass(slots=True)
+class RelationWindowQueryCache:
+    interval_cache: dict[str, list[tuple[datetime, datetime | None]]]
+    relation_key_cache: dict[str, set[tuple[str, str, str]]]
+    source_relation_events: dict[str, list[Event]]
+
+
 def open_connection(db_path: Path) -> sqlite3.Connection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path)
@@ -478,6 +485,39 @@ class EventStore:
         ).fetchall()
         return [self._row_to_event(row) for row in rows]
 
+    def entity_events_known_visible_for_entities(
+        self,
+        entity_ids: list[str],
+        recorded_at: str,
+    ) -> dict[str, list[Event]]:
+        if not entity_ids:
+            return {}
+        placeholders = ",".join("?" for _ in entity_ids)
+        rows = self.conn.execute(
+            f"""
+            SELECT ee.entity_id AS lookup_entity_id, e.*
+            FROM events e
+            JOIN event_entities ee ON ee.event_id = e.id
+            LEFT JOIN extraction_runs r ON r.id = e.extraction_run_id
+            WHERE ee.entity_id IN ({placeholders})
+              AND e.recorded_at <= ?
+              AND (
+                e.extraction_run_id IS NULL
+                OR (
+                    r.status = 'SUCCEEDED'
+                    AND r.processed_at <= ?
+                    AND (r.superseded_at IS NULL OR r.superseded_at > ?)
+                )
+              )
+            ORDER BY ee.entity_id ASC, e.recorded_at ASC, e.seq ASC
+            """,
+            [*entity_ids, recorded_at, recorded_at, recorded_at],
+        ).fetchall()
+        grouped: dict[str, list[Event]] = {entity_id: [] for entity_id in entity_ids}
+        for row in rows:
+            grouped.setdefault(str(row["lookup_entity_id"]), []).append(self._row_to_event(row))
+        return grouped
+
     def entity_events_valid_visible(self, entity_id: str) -> list[Event]:
         rows = self.conn.execute(
             """
@@ -498,6 +538,33 @@ class EventStore:
             (entity_id,),
         ).fetchall()
         return [self._row_to_event(row) for row in rows]
+
+    def entity_events_valid_visible_for_entities(self, entity_ids: list[str]) -> dict[str, list[Event]]:
+        if not entity_ids:
+            return {}
+        placeholders = ",".join("?" for _ in entity_ids)
+        rows = self.conn.execute(
+            f"""
+            SELECT ee.entity_id AS lookup_entity_id, e.*
+            FROM events e
+            JOIN event_entities ee ON ee.event_id = e.id
+            LEFT JOIN extraction_runs r ON r.id = e.extraction_run_id
+            WHERE ee.entity_id IN ({placeholders})
+              AND (
+                e.extraction_run_id IS NULL
+                OR (
+                    r.status = 'SUCCEEDED'
+                    AND r.superseded_at IS NULL
+                )
+              )
+            ORDER BY ee.entity_id ASC, e.recorded_at ASC, e.seq ASC
+            """,
+            entity_ids,
+        ).fetchall()
+        grouped: dict[str, list[Event]] = {entity_id: [] for entity_id in entity_ids}
+        for row in rows:
+            grouped.setdefault(str(row["lookup_entity_id"]), []).append(self._row_to_event(row))
+        return grouped
 
     def entity_events_known_current(self, entity_id: str) -> list[Event]:
         return self.entity_events_valid_visible(entity_id)
@@ -682,6 +749,32 @@ class EventStore:
     def materialize_current_relations(self, entity_id: str) -> list[RelationEdge]:
         return self.relation_edges_known_at(entity_id, to_rfc3339(utcnow()))
 
+    def fold_entities_known_at(
+        self,
+        entity_ids: list[str],
+        recorded_at: str,
+    ) -> dict[str, FoldedEntityState | None]:
+        events_by_entity = self.entity_events_known_visible_for_entities(entity_ids, recorded_at)
+        return {
+            entity_id: self.fold_entity_events(entity_id, events_by_entity.get(entity_id, []))
+            for entity_id in entity_ids
+        }
+
+    def fold_entities_valid_at(
+        self,
+        entity_ids: list[str],
+        at: datetime,
+    ) -> dict[str, FoldedValidEntityState | None]:
+        events_by_entity = self.entity_events_valid_visible_for_entities(entity_ids)
+        return {
+            entity_id: self.fold_entity_events_valid_at(
+                entity_id,
+                at,
+                events=events_by_entity.get(entity_id, []),
+            )
+            for entity_id in entity_ids
+        }
+
     def relation_edges_known_at(self, entity_id: str, recorded_at: str) -> list[RelationEdge]:
         active_cache: dict[str, bool] = {}
 
@@ -695,6 +788,24 @@ class EventStore:
             self.relation_events_known_visible_at(entity_id, recorded_at),
             endpoint_active=endpoint_active,
         )
+
+    def relation_edges_known_at_many(self, entity_ids: list[str], recorded_at: str) -> dict[str, list[RelationEdge]]:
+        events_by_entity = self.entity_events_known_visible_for_entities(entity_ids, recorded_at)
+        active_cache: dict[str, bool] = {}
+
+        def endpoint_active(candidate_id: str) -> bool:
+            if candidate_id not in active_cache:
+                active_cache[candidate_id] = self._entity_is_known_active_at(candidate_id, recorded_at)
+            return active_cache[candidate_id]
+
+        return {
+            entity_id: self.fold_relation_edges(
+                entity_id,
+                [event for event in events_by_entity.get(entity_id, []) if event.type.startswith("relation.")],
+                endpoint_active=endpoint_active,
+            )
+            for entity_id in entity_ids
+        }
 
     def relation_edges_valid_at(self, entity_id: str, at: datetime) -> list[RelationEdge]:
         active_cache: dict[str, bool] = {}
@@ -711,13 +822,45 @@ class EventStore:
             endpoint_active=endpoint_active,
         )
 
+    def relation_edges_valid_at_many(self, entity_ids: list[str], at: datetime) -> dict[str, list[RelationEdge]]:
+        events_by_entity = self.entity_events_valid_visible_for_entities(entity_ids)
+        active_cache: dict[str, bool] = {}
+
+        def endpoint_active(candidate_id: str) -> bool:
+            if candidate_id not in active_cache:
+                active_cache[candidate_id] = self._entity_is_valid_active_at(candidate_id, at)
+            return active_cache[candidate_id]
+
+        return {
+            entity_id: self.fold_relation_edges_valid_at(
+                entity_id,
+                at,
+                events=[event for event in events_by_entity.get(entity_id, []) if event.type.startswith("relation.")],
+                endpoint_active=endpoint_active,
+            )
+            for entity_id in entity_ids
+        }
+
     def relation_edges_valid_in_window(
         self,
         entity_id: str,
         start_at: datetime,
         end_at: datetime,
     ) -> list[RelationEdge]:
-        interval_cache: dict[str, list[tuple[datetime, datetime | None]]] = {}
+        return self.relation_edges_valid_in_window_many([entity_id], start_at, end_at).get(entity_id, [])
+
+    def relation_edges_valid_in_window_many(
+        self,
+        entity_ids: list[str],
+        start_at: datetime,
+        end_at: datetime,
+        *,
+        query_cache: RelationWindowQueryCache | None = None,
+    ) -> dict[str, list[RelationEdge]]:
+        if not entity_ids:
+            return {}
+        cache = query_cache or self.build_relation_window_query_cache(start_at, end_at, source_entity_ids=entity_ids)
+        self._ensure_relation_window_sources(cache, entity_ids)
 
         def endpoint_active_in_window(source: str, target: str, overlap_start: datetime, overlap_end: datetime) -> bool:
             return self._entities_are_valid_together_in_window(
@@ -725,16 +868,19 @@ class EventStore:
                 target,
                 overlap_start,
                 overlap_end,
-                interval_cache=interval_cache,
+                interval_cache=cache.interval_cache,
             )
 
-        return self.fold_relation_edges_valid_in_window(
-            entity_id,
-            start_at,
-            end_at,
-            events=self.relation_events_valid_visible(entity_id),
-            endpoint_active_in_window=endpoint_active_in_window,
-        )
+        return {
+            entity_id: self.fold_relation_edges_valid_in_window(
+                entity_id,
+                start_at,
+                end_at,
+                events=cache.source_relation_events.get(entity_id, []),
+                endpoint_active_in_window=endpoint_active_in_window,
+            )
+            for entity_id in entity_ids
+        }
 
     def relation_events_known_visible_at(self, entity_id: str, recorded_at: str) -> list[Event]:
         return [
@@ -749,6 +895,12 @@ class EventStore:
             for event in self.entity_events_valid_visible(entity_id)
             if event.type.startswith("relation.")
         ]
+
+    def relation_events_valid_visible_for_entities(self, entity_ids: list[str]) -> dict[str, list[Event]]:
+        return {
+            entity_id: [event for event in events if event.type.startswith("relation.")]
+            for entity_id, events in self.entity_events_valid_visible_for_entities(entity_ids).items()
+        }
 
     def fold_entity_events(self, entity_id: str, events: list[Event]) -> FoldedEntityState | None:
         entity_type = "unknown"
@@ -975,9 +1127,18 @@ class EventStore:
         events: list[Event],
         start_at: datetime,
         end_at: datetime,
+        *,
+        query_cache: RelationWindowQueryCache | None = None,
     ) -> list[Event]:
-        interval_cache: dict[str, list[tuple[datetime, datetime | None]]] = {}
-        relation_key_cache: dict[str, set[tuple[str, str, str]]] = {}
+        cache = query_cache or self.build_relation_window_query_cache(start_at, end_at)
+        source_ids = sorted(
+            {
+                str(event.data["source"])
+                for event in events
+                if event.type.startswith("relation.")
+            }
+        )
+        self._ensure_relation_window_sources(cache, source_ids)
 
         def endpoint_active_in_window(
             overlap_source: str,
@@ -990,20 +1151,20 @@ class EventStore:
                 overlap_target,
                 overlap_start,
                 overlap_end,
-                interval_cache=interval_cache,
+                interval_cache=cache.interval_cache,
             )
 
         def active_relation_keys_for_source(source: str) -> set[tuple[str, str, str]]:
-            if source not in relation_key_cache:
-                relation_key_cache[source] = set(
+            if source not in cache.relation_key_cache:
+                cache.relation_key_cache[source] = set(
                     _relation_window_states(
-                        self.entity_events_valid_visible(source),
+                        cache.source_relation_events.get(source, []),
                         start_at,
                         end_at,
                         endpoint_active_in_window=endpoint_active_in_window,
                     ).keys()
                 )
-            return relation_key_cache[source]
+            return cache.relation_key_cache[source]
 
         filtered: list[Event] = []
         for event in events:
@@ -1014,6 +1175,32 @@ class EventStore:
             if key in active_relation_keys_for_source(key[0]):
                 filtered.append(event)
         return filtered
+
+    def build_relation_window_query_cache(
+        self,
+        start_at: datetime,
+        end_at: datetime,
+        *,
+        source_entity_ids: list[str] | None = None,
+    ) -> RelationWindowQueryCache:
+        cache = RelationWindowQueryCache(
+            interval_cache={},
+            relation_key_cache={},
+            source_relation_events={},
+        )
+        if source_entity_ids:
+            self._ensure_relation_window_sources(cache, source_entity_ids)
+        return cache
+
+    def _ensure_relation_window_sources(
+        self,
+        cache: RelationWindowQueryCache,
+        source_entity_ids: list[str],
+    ) -> None:
+        missing_ids = [entity_id for entity_id in source_entity_ids if entity_id not in cache.source_relation_events]
+        if not missing_ids:
+            return
+        cache.source_relation_events.update(self.relation_events_valid_visible_for_entities(missing_ids))
 
     def _entity_is_known_active_at(self, entity_id: str, recorded_at: str) -> bool:
         return self.fold_entity_events(

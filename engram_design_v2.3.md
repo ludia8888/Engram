@@ -839,6 +839,7 @@ def context(
 - semantic 검색은 현재 embedder version의 `vec_events`만 사용한다.
 - semantic row가 없는 경우에도 검색은 lexical-only로 정상 동작한다.
 - `context()`는 `search()` 결과를 바탕으로 `Memory Basis / Current State / Relevant Changes / Raw Evidence` 섹션을 만든다.
+- `context()`는 현재 결과 entity들을 batch prefetch해서 entity view와 relation summary를 한 번에 계산한다.
 - relation event가 supporting event에 포함되면 source/target entity를 현재 상태 후보로 투영하고, active relation summary를 `Current State`에 함께 적는다.
 - relation event는 query의 mode/time 기준에서 양 endpoint entity가 모두 active일 때만 active relation seed로 취급한다.
 - `context(time_mode="valid", time_window=...)`의 relation summary는 `relations_active_in_window=...` 형식으로 표기하고, 구간 중 활성이라는 의미를 드러낸다.
@@ -1120,6 +1121,7 @@ query
 - semantic row가 없는 이벤트는 lexical-only 후보로 남는다.
 - `OpenAIEmbedder`는 semantic 품질을 높이는 opt-in 선택지지만, 현재 검색 구조 자체를 가속하는 것은 아니다.
 - relation valid-window 검색은 correctness-first 구현이다. 현재는 visible event를 순회하면서 relation key/endpoint overlap을 Python helper로 계산하므로, relation 수가 많거나 window가 넓은 경우 이후 최적화 대상이 될 수 있다.
+- 다만 current 구현은 같은 query 안에서 relation valid-window interval cache와 source별 active relation key cache를 search/context가 재사용해, 반복 계산은 줄인다.
 - causal expansion은 현재 mode의 visible event 집합 안에서만 수행되고, same-batch alias 해석이나 heuristic causal 추론은 하지 않는다.
 
 ### 10.2 Run visibility 필터
