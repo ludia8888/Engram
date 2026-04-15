@@ -419,10 +419,18 @@ class EventStore:
                 WHEN json_extract(e.data, '$.target') = ? THEN json_extract(e.data, '$.source')
             END AS other_entity_id
             FROM events e
+            LEFT JOIN extraction_runs r ON r.id = e.extraction_run_id
             WHERE e.type LIKE 'relation.%'
               AND (
                     json_extract(e.data, '$.source') = ?
                  OR json_extract(e.data, '$.target') = ?
+              )
+              AND (
+                e.extraction_run_id IS NULL
+                OR (
+                    r.status = 'SUCCEEDED'
+                    AND r.superseded_at IS NULL
+                )
               )
             ORDER BY other_entity_id ASC
             """,

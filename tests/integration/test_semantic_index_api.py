@@ -557,6 +557,34 @@ def test_query_embedding_cache_is_separated_by_embedder_version(tmp_path):
     mem.close()
 
 
+def test_query_embedding_cache_normalizes_query_text_before_embedding(tmp_path):
+    embedder = CountingEmbedder(
+        version="counting-v1",
+        mapping={
+            "ramen": [1.0, 0.0, 0.0],
+            'entity.create {"attrs": {"food": "noodle-soup"}, "id": "food:ramen", "type": "food"} manual': [1.0, 0.0, 0.0],
+        },
+    )
+    mem = Engram(user_id="alice", path=str(tmp_path), embedder=embedder)
+    mem.append(
+        "entity.create",
+        {"id": "food:ramen", "type": "food", "attrs": {"food": "noodle-soup"}},
+        observed_at=dt("2026-05-01T10:00:00Z"),
+    )
+    mem.flush("index")
+    embedder.calls.clear()
+
+    upper = mem.search("RAMEN", k=5)
+    lower = mem.search("ramen", k=5)
+
+    assert upper and lower
+    assert upper[0].entity_id == "food:ramen"
+    assert lower[0].entity_id == "food:ramen"
+    assert embedder.calls == [["ramen"]]
+
+    mem.close()
+
+
 def test_search_passes_candidate_ids_into_visible_event_fetch(tmp_path, monkeypatch):
     mem = Engram(
         user_id="alice",

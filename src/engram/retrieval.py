@@ -364,7 +364,7 @@ class RetrievalEngine:
             self._query_embedding_cache.move_to_end(cache_key)
             return cached
 
-        query_embedding = self.embedder.embed_texts([query])
+        query_embedding = self.embedder.embed_texts([normalized_query])
         if len(query_embedding) != 1:
             raise ValueError(f"embedder returned {len(query_embedding)} query embeddings")
         vector = query_embedding[0]
