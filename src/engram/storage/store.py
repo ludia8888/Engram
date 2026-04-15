@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import TypeAlias
 
 from engram.time_utils import from_rfc3339, to_rfc3339
-from engram.types import Event
+from engram.types import Entity, Event
 
 DirtyRangeRow: TypeAlias = tuple[str, str, str, str | None, str, str]
 
@@ -111,6 +111,42 @@ class EventStore:
         row = self.conn.execute("SELECT COUNT(*) FROM dirty_ranges").fetchone()
         return int(row[0])
 
+    def dirty_owner_ids(self) -> list[str]:
+        rows = self.conn.execute(
+            """
+            SELECT DISTINCT owner_id
+            FROM dirty_ranges
+            ORDER BY owner_id ASC
+            """
+        ).fetchall()
+        return [str(row[0]) for row in rows]
+
+    def clear_dirty_ranges_for_owners(
+        self,
+        tx: sqlite3.Connection,
+        owners: list[str],
+    ) -> None:
+        if not owners:
+            return
+        placeholders = ",".join("?" for _ in owners)
+        tx.execute(
+            f"DELETE FROM dirty_ranges WHERE owner_id IN ({placeholders})",
+            owners,
+        )
+
+    def clear_all_dirty_ranges(self, tx: sqlite3.Connection) -> None:
+        tx.execute("DELETE FROM dirty_ranges")
+
+    def all_entity_ids(self) -> list[str]:
+        rows = self.conn.execute(
+            """
+            SELECT DISTINCT entity_id
+            FROM event_entities
+            ORDER BY entity_id ASC
+            """
+        ).fetchall()
+        return [str(row[0]) for row in rows]
+
     def entity_events_visible_at(self, entity_id: str, recorded_at: str) -> list[Event]:
         rows = self.conn.execute(
             """
@@ -138,6 +174,9 @@ class EventStore:
         ).fetchall()
         return [self._row_to_event(row) for row in rows]
 
+    def materialize_current_entity(self, entity_id: str) -> Entity | None:
+        return self._materialize_entity_from_events(entity_id, self.entity_events(entity_id))
+
     def _row_to_event(self, row: sqlite3.Row) -> Event:
         return Event(
             id=row["id"],
@@ -156,4 +195,43 @@ class EventStore:
             time_confidence=row["time_confidence"],
             caused_by=row["caused_by"],
             schema_version=int(row["schema_version"]),
+        )
+
+    def _materialize_entity_from_events(self, entity_id: str, events: list[Event]) -> Entity | None:
+        entity_type = "unknown"
+        attrs: dict = {}
+        created_at = None
+        updated_at = None
+        active = False
+
+        for event in events:
+            if not event.type.startswith("entity.") or event.data["id"] != entity_id:
+                continue
+            if event.type == "entity.create":
+                entity_type = event.data["type"]
+                attrs = dict(event.data["attrs"])
+                created_at = event.recorded_at
+                updated_at = event.recorded_at
+                active = True
+            elif event.type == "entity.update":
+                if not active:
+                    created_at = event.recorded_at
+                    active = True
+                attrs.update(event.data["attrs"])
+                updated_at = event.recorded_at
+            elif event.type == "entity.delete":
+                attrs = {}
+                created_at = None
+                updated_at = None
+                active = False
+
+        if not active or created_at is None or updated_at is None:
+            return None
+
+        return Entity(
+            id=entity_id,
+            type=entity_type,
+            attrs=dict(attrs),
+            created_recorded_at=created_at,
+            updated_recorded_at=updated_at,
         )

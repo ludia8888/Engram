@@ -3,9 +3,11 @@ from __future__ import annotations
 import queue
 import re
 from pathlib import Path
+from typing import Literal
 from uuid import uuid4
 
 from .errors import ValidationError
+from .projector import Projector
 from .storage import EventStore, SegmentedRawLog, WriterLock, open_connection
 from .storage.store import DirtyRangeRow
 from .time_utils import ensure_utc, to_rfc3339, utcnow
@@ -41,6 +43,7 @@ class Engram:
         self.conn = open_connection(self.db_path)
         self.store = EventStore(self.conn)
         self.raw_log = SegmentedRawLog(self.root / "raw")
+        self.projector = Projector(self.store)
         self.queue: queue.Queue[QueueItem] = queue.Queue(maxsize=queue_max_size)
 
     def close(self) -> None:
@@ -221,6 +224,22 @@ class Engram:
 
     def raw_recent(self, limit: int = 20) -> list[RawTurn]:
         return self.raw_log.raw_recent(limit=limit)
+
+    def flush(
+        self,
+        level: Literal["raw", "canonical", "projection", "index"] = "projection",
+    ) -> None:
+        if level in {"raw", "canonical"}:
+            return
+        if level == "projection":
+            while self.store.count_dirty_ranges() > 0:
+                rebuilt = self.projector.rebuild_dirty()
+                if rebuilt == 0 and self.store.count_dirty_ranges() > 0:
+                    raise RuntimeError("projection flush made no progress")
+            return
+        if level == "index":
+            raise NotImplementedError("flush(level='index') is planned for semantic indexing")
+        raise ValidationError(f"unsupported flush level: {level}")
 
     def _validate_event(self, event_type: str, data: dict) -> None:
         if event_type == "entity.create":
