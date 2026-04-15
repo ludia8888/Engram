@@ -332,3 +332,150 @@ def test_extractor_runtime_binding_happens_after_raw_log_is_ready(tmp_path):
 
     assert extractor.bound_recent_count == 0
     mem.close()
+
+
+def test_extractor_temporal_extraction_enables_valid_time_query(tmp_path, monkeypatch):
+    _install_fake_openai(
+        monkeypatch,
+        [
+            {
+                "events": [
+                    {
+                        "type": "entity.create",
+                        "data": {"id": "self", "type": "user", "attrs": {"location": "Busan"}},
+                        "confidence": 0.95,
+                        "reason": "사용자가 지난주에 부산으로 이사했다고 명시함",
+                        "effective_at_start": "2026-04-24T00:00:00Z",
+                        "time_confidence": "inferred",
+                    }
+                ]
+            }
+        ],
+    )
+    mem = Engram(
+        user_id="alice",
+        path=str(tmp_path),
+        extractor=OpenAIExtractor(api_key="test-key"),
+    )
+    mem.turn(
+        user="지난주에 부산으로 이사했어",
+        assistant="알겠어요.",
+        observed_at=dt("2026-05-01T10:00:00Z"),
+    )
+    mem.flush("all")
+
+    valid_view = mem.get_valid_at("user:alice", dt("2026-04-25T00:00:00Z"))
+    assert valid_view is not None
+    assert valid_view.attrs == {"location": "Busan"}
+    assert valid_view.basis == "valid"
+
+    before_view = mem.get_valid_at("user:alice", dt("2026-04-20T00:00:00Z"))
+    assert before_view is None
+
+    history = mem.valid_history("user:alice")
+    assert len(history) == 1
+    assert history[0].attr == "location"
+    assert history[0].effective_at_start == dt("2026-04-24T00:00:00Z")
+
+    mem.close()
+
+
+def test_extractor_omitted_temporal_fields_default_to_unknown(tmp_path, monkeypatch):
+    _install_fake_openai(
+        monkeypatch,
+        [
+            {
+                "events": [
+                    {
+                        "type": "entity.create",
+                        "data": {"id": "self", "type": "user", "attrs": {"diet": "vegetarian"}},
+                        "confidence": 0.9,
+                        "reason": "사용자가 채식주의자라고 말함",
+                    }
+                ]
+            }
+        ],
+    )
+    mem = Engram(
+        user_id="alice",
+        path=str(tmp_path),
+        extractor=OpenAIExtractor(api_key="test-key"),
+    )
+    mem.turn(
+        user="나는 채식주의자야",
+        assistant="알겠어.",
+        observed_at=dt("2026-05-01T10:00:00Z"),
+    )
+    mem.flush("all")
+
+    known_view = mem.get("user:alice")
+    assert known_view is not None
+    assert known_view.attrs == {"diet": "vegetarian"}
+
+    valid_view = mem.get_valid_at("user:alice", dt("2026-05-01T10:00:00Z"))
+    assert valid_view is None or valid_view.unknown_attrs == ["diet"]
+
+    mem.close()
+
+
+def test_extractor_auto_wires_causal_link_from_entity_to_relation(tmp_path, monkeypatch):
+    _install_fake_openai(
+        monkeypatch,
+        [
+            {
+                "events": [
+                    {
+                        "type": "entity.create",
+                        "data": {"id": "self", "type": "user", "attrs": {"name": "Alice"}},
+                        "confidence": 0.9,
+                        "reason": "사용자가 자신을 소개함",
+                    },
+                    {
+                        "type": "entity.create",
+                        "data": {"id": "person:bob", "type": "person", "attrs": {"name": "Bob"}},
+                        "confidence": 0.9,
+                        "reason": "Bob을 명시적으로 언급함",
+                    },
+                    {
+                        "type": "relation.create",
+                        "data": {
+                            "source": "self",
+                            "target": "person:bob",
+                            "type": "manager",
+                            "attrs": {"scope": "work"},
+                        },
+                        "confidence": 0.88,
+                        "reason": "Bob이 매니저라고 명시함",
+                    },
+                ]
+            }
+        ],
+    )
+    mem = Engram(
+        user_id="alice",
+        path=str(tmp_path),
+        extractor=OpenAIExtractor(api_key="test-key"),
+    )
+    mem.turn(
+        user="Bob is my manager at work",
+        assistant="Noted.",
+        observed_at=dt("2026-05-01T10:00:00Z"),
+    )
+    mem.flush("all")
+
+    events = mem.store.events_by_ids(
+        [event.id for event in mem.store.visible_events_valid()]
+    )
+    relation_events = [e for e in events if e.type == "relation.create"]
+    entity_events = [e for e in events if e.type == "entity.create"]
+
+    assert len(relation_events) == 1
+    assert relation_events[0].caused_by is not None
+    assert relation_events[0].caused_by in {e.id for e in entity_events}
+
+    results = mem.search("manager", k=5)
+    assert results
+    causal_axes = {axis for r in results for axis in r.matched_axes}
+    assert "causal" in causal_axes
+
+    mem.close()

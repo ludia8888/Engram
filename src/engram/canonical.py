@@ -50,7 +50,11 @@ class CanonicalWorker:
         try:
             for draft in drafts:
                 validate_event(draft.type, draft.data)
-                if draft.caused_by is not None and not self.store.event_exists(draft.caused_by):
+                if (
+                    draft.caused_by is not None
+                    and not draft.caused_by.startswith(_BATCH_REF_PREFIX)
+                    and not self.store.event_exists(draft.caused_by)
+                ):
                     raise ValidationError(f"caused_by event not found: {draft.caused_by}")
             run_id = str(uuid4())
             active_runs = self.store.active_successful_runs_for_turn(item.turn_id)
@@ -81,7 +85,9 @@ class CanonicalWorker:
 
                 next_seq = self.store.next_seq(tx)
                 dirty_rows: list[DirtyRangeRow] = []
+                batch_event_ids: list[str] = []
                 for offset, draft in enumerate(drafts):
+                    caused_by = _resolve_batch_caused_by(draft.caused_by, batch_event_ids)
                     event = Event(
                         id=str(uuid4()),
                         seq=next_seq + offset,
@@ -97,9 +103,10 @@ class CanonicalWorker:
                         confidence=draft.confidence,
                         reason=draft.reason,
                         time_confidence=draft.time_confidence,
-                        caused_by=draft.caused_by,
+                        caused_by=caused_by,
                         schema_version=1,
                     )
+                    batch_event_ids.append(event.id)
                     event_entities = derive_event_entities(event)
                     self.store.append_event(tx, event)
                     self.store.append_event_entities(tx, event.id, event_entities)
@@ -144,6 +151,26 @@ class CanonicalWorker:
         )
         with self.store.transaction() as tx:
             self.store.append_extraction_run(tx, run)
+
+
+_BATCH_REF_PREFIX = "__batch_ref:"
+
+
+def _resolve_batch_caused_by(
+    raw_caused_by: str | None,
+    batch_event_ids: list[str],
+) -> str | None:
+    if raw_caused_by is None:
+        return None
+    if not raw_caused_by.startswith(_BATCH_REF_PREFIX):
+        return raw_caused_by
+    try:
+        index = int(raw_caused_by[len(_BATCH_REF_PREFIX):])
+    except ValueError:
+        return None
+    if 0 <= index < len(batch_event_ids):
+        return batch_event_ids[index]
+    return None
 
 
 def _dirty_rows_for_owners(

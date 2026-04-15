@@ -370,3 +370,91 @@ def test_relation_endpoint_falls_back_to_entity_when_no_batch_context(monkeypatc
     events = extractor.extract(_queue_item())
 
     assert events[0].data["target"] == "entity:seoul"
+
+
+def test_temporal_fields_are_parsed_when_present(monkeypatch):
+    _install_fake_openai(
+        monkeypatch,
+        [
+            {
+                "events": [
+                    {
+                        "type": "entity.update",
+                        "data": {"id": "self", "attrs": {"location": "Busan"}},
+                        "confidence": 0.95,
+                        "reason": "moved last week",
+                        "effective_at_start": "2026-04-24T00:00:00Z",
+                        "time_confidence": "inferred",
+                    }
+                ]
+            }
+        ],
+    )
+    extractor = OpenAIExtractor()
+    extractor.bind_runtime_context(
+        safe_user_id="alice",
+        recent_turns_provider=lambda item, limit: [],
+    )
+
+    events = extractor.extract(_queue_item())
+
+    assert events[0].effective_at_start == dt("2026-04-24T00:00:00Z")
+    assert events[0].effective_at_end is None
+    assert events[0].time_confidence == "inferred"
+
+
+def test_temporal_fields_default_to_unknown_when_omitted(monkeypatch):
+    _install_fake_openai(
+        monkeypatch,
+        [
+            {
+                "events": [
+                    {
+                        "type": "entity.update",
+                        "data": {"id": "self", "attrs": {"diet": "vegan"}},
+                        "confidence": 0.9,
+                        "reason": "no time stated",
+                    }
+                ]
+            }
+        ],
+    )
+    extractor = OpenAIExtractor()
+    extractor.bind_runtime_context(
+        safe_user_id="alice",
+        recent_turns_provider=lambda item, limit: [],
+    )
+
+    events = extractor.extract(_queue_item())
+
+    assert events[0].effective_at_start is None
+    assert events[0].time_confidence == "unknown"
+
+
+def test_exact_time_confidence_is_preserved(monkeypatch):
+    _install_fake_openai(
+        monkeypatch,
+        [
+            {
+                "events": [
+                    {
+                        "type": "entity.update",
+                        "data": {"id": "self", "attrs": {"birthday": "1990-03-15"}},
+                        "confidence": 0.99,
+                        "reason": "exact date stated",
+                        "effective_at_start": "1990-03-15T00:00:00Z",
+                        "time_confidence": "exact",
+                    }
+                ]
+            }
+        ],
+    )
+    extractor = OpenAIExtractor()
+    extractor.bind_runtime_context(
+        safe_user_id="alice",
+        recent_turns_provider=lambda item, limit: [],
+    )
+
+    events = extractor.extract(_queue_item())
+
+    assert events[0].time_confidence == "exact"
