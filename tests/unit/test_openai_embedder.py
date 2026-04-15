@@ -44,10 +44,58 @@ def test_openai_embedder_version_changes_with_model_and_dimensions():
     default = OpenAIEmbedder(model="text-embedding-3-small")
     resized = OpenAIEmbedder(model="text-embedding-3-small", dimensions=256)
     different_model = OpenAIEmbedder(model="text-embedding-3-large")
+    different_backend = OpenAIEmbedder(model="text-embedding-3-small", base_url="https://proxy.example/v1")
+    overridden_space = OpenAIEmbedder(model="text-embedding-3-small", semantic_space_id="tenant-a")
 
     assert default.version != resized.version
     assert default.version != different_model.version
     assert resized.version != different_model.version
+    assert default.version != different_backend.version
+    assert default.version != overridden_space.version
+
+
+def test_openai_embedder_validates_inconsistent_embedding_dimensions(monkeypatch):
+    class FakeEmbeddings:
+        def create(self, *, model, input, dimensions=None):
+            return types.SimpleNamespace(
+                data=[
+                    types.SimpleNamespace(embedding=[1.0, 0.0, 0.0]),
+                    types.SimpleNamespace(embedding=[0.0, 1.0]),
+                ]
+            )
+
+    class FakeOpenAI:
+        def __init__(self, *, api_key=None, base_url=None):
+            self.embeddings = FakeEmbeddings()
+
+    monkeypatch.setattr(semantic_module, "_load_openai_client_class", lambda: FakeOpenAI)
+
+    embedder = OpenAIEmbedder()
+
+    with pytest.raises(ValueError, match="inconsistent embedding dimensions"):
+        embedder.embed_texts(["alpha", "beta"])
+
+
+def test_openai_embedder_validates_requested_dimension(monkeypatch):
+    class FakeEmbeddings:
+        def create(self, *, model, input, dimensions=None):
+            assert dimensions == 5
+            return types.SimpleNamespace(
+                data=[
+                    types.SimpleNamespace(embedding=[1.0, 0.0, 0.0]),
+                ]
+            )
+
+    class FakeOpenAI:
+        def __init__(self, *, api_key=None, base_url=None):
+            self.embeddings = FakeEmbeddings()
+
+    monkeypatch.setattr(semantic_module, "_load_openai_client_class", lambda: FakeOpenAI)
+
+    embedder = OpenAIEmbedder(dimensions=5)
+
+    with pytest.raises(ValueError, match="expected requested dim 5"):
+        embedder.embed_texts(["alpha"])
 
 
 def test_openai_embedder_raises_clear_error_when_sdk_missing(monkeypatch):

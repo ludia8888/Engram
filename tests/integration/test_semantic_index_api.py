@@ -564,3 +564,41 @@ def test_search_can_match_semantic_only_with_openai_embedder(tmp_path, monkeypat
     assert "food:ramen" in text
 
     mem.close()
+
+
+def test_openai_embedder_backend_change_creates_new_version_rows(tmp_path, monkeypatch):
+    install_fake_openai(
+        monkeypatch,
+        {
+            'entity.create {"attrs": {"diet": "vegetarian"}, "id": "user:alice", "type": "user"} manual': [1.0, 0.0, 0.0],
+        },
+    )
+    first_embedder = OpenAIEmbedder(api_key="test-key", base_url="https://api.openai.com/v1")
+    first = Engram(user_id="alice", path=str(tmp_path), embedder=first_embedder)
+    first.append(
+        "entity.create",
+        {"id": "user:alice", "type": "user", "attrs": {"diet": "vegetarian"}},
+        observed_at=dt("2026-05-01T10:00:00Z"),
+    )
+    first.flush("index")
+    first.close()
+
+    install_fake_openai(
+        monkeypatch,
+        {
+            'entity.create {"attrs": {"diet": "vegetarian"}, "id": "user:alice", "type": "user"} manual': [0.0, 1.0, 0.0],
+        },
+    )
+    second_embedder = OpenAIEmbedder(api_key="test-key", base_url="https://proxy.example/v1")
+    second = Engram(user_id="alice", path=str(tmp_path), embedder=second_embedder)
+
+    assert first_embedder.version != second_embedder.version
+    assert second.store.count_vec_events(first_embedder.version) == 1
+    assert second.store.count_vec_events(second_embedder.version) == 0
+
+    second.flush("index")
+
+    assert second.store.count_vec_events(first_embedder.version) == 1
+    assert second.store.count_vec_events(second_embedder.version) == 1
+
+    second.close()

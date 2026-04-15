@@ -6,6 +6,7 @@ import json
 import math
 import struct
 from typing import Protocol
+from urllib.parse import urlsplit
 
 from .types import Event
 
@@ -41,14 +42,16 @@ class OpenAIEmbedder:
         model: str = _OPENAI_DEFAULT_MODEL,
         dimensions: int | None = None,
         base_url: str | None = None,
+        semantic_space_id: str | None = None,
     ):
         self.api_key = api_key
         self.model = model
         self._requested_dimensions = dimensions
         self.base_url = base_url
+        self.semantic_space_id = semantic_space_id or _default_openai_space_id(base_url)
         self.dim = dimensions or _OPENAI_DEFAULT_DIMS.get(model, 0)
         dims_label = str(dimensions) if dimensions is not None else "default"
-        self.version = f"openai:{model}:{dims_label}:v1"
+        self.version = f"openai:{self.semantic_space_id}:{model}:{dims_label}:v1"
         self._client = None
 
     def embed_texts(self, texts: list[str]) -> list[list[float]]:
@@ -145,3 +148,15 @@ def _load_openai_client_class():
     if client_class is None:
         raise RuntimeError('Installed "openai" package does not expose OpenAI client class.')
     return client_class
+
+
+def _default_openai_space_id(base_url: str | None) -> str:
+    if base_url is None:
+        return "api.openai.com"
+
+    parsed = urlsplit(base_url)
+    if parsed.netloc:
+        path = parsed.path.rstrip("/")
+        return f"{parsed.netloc.lower()}{path}" if path else parsed.netloc.lower()
+
+    return base_url.rstrip("/").lower()

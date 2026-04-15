@@ -658,6 +658,8 @@ class Engram:
 - 현재 런타임은 `HashEmbedder` 외에 opt-in `OpenAIEmbedder`도 지원한다.
 - `OpenAIEmbedder`를 쓰려면 optional dependency 설치가 필요하다: `pip install "engram[openai]"`.
 - `OpenAIEmbedder`는 기본적으로 `OPENAI_API_KEY`를 사용하고, 기본 모델은 `text-embedding-3-small`이다.
+- `OpenAIEmbedder`의 version은 최소한 backend identity, model, dimensions를 함께 반영한다.
+- backend를 명시적으로 분리해야 할 때는 `semantic_space_id` override로 새 semantic version을 강제할 수 있다.
 
 ### 7.3 Write API
 
@@ -724,6 +726,7 @@ def flush(
 - `flush("index")`는 현재 embedder version 기준으로 아직 인덱싱되지 않은 canonical event를 `vec_events`에 backfill한다.
 - embedder version이 바뀌면 이전 vector row는 남겨두고, 검색은 현재 version row만 사용한다.
 - `OpenAIEmbedder`를 쓰더라도 `flush("index")`의 의미는 같다. 달라지는 건 현재 version row의 생성 방식뿐이다.
+- 즉 같은 model/dim이라도 backend identity나 `semantic_space_id`가 달라지면 새 version row를 다시 만들게 된다.
 - `turn()`만 호출한 raw turn은 `flush("projection")`으로도 canonical/projection에 올라가지 않는다.
 
 ### 7.5 Query API
