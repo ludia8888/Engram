@@ -6,11 +6,12 @@ from pathlib import Path
 from typing import Literal
 from uuid import uuid4
 
+from .canonical import CanonicalWorker, Extractor, NullExtractor
 from .errors import ValidationError
+from .event_ops import derive_dirty_rows, derive_event_entities, validate_event
 from .projector import Projector
 from .recovery import RecoveryService
 from .storage import EventStore, SegmentedRawLog, WriterLock, open_connection
-from .storage.store import DirtyRangeRow
 from .time_utils import ensure_utc, to_rfc3339, utcnow
 from .types import Entity, Event, HistoryEntry, QueueItem, RawTurn, TemporalEntityView, TurnAck
 
@@ -28,6 +29,7 @@ class Engram:
         session_id: str | None = None,
         queue_max_size: int = 10000,
         queue_put_timeout: float = 1.0,
+        extractor: Extractor | None = None,
     ):
         base_root = Path(path) if path else Path.home() / ".engram" / "users"
         self.user_id = user_id
@@ -37,6 +39,7 @@ class Engram:
         self.db_path = self.root / "engram.db"
         self.session_id = session_id
         self.queue_put_timeout = queue_put_timeout
+        self.extractor = extractor or NullExtractor()
 
         self._writer_lock = WriterLock(self.root / ".writer.lock")
         self.conn = None
@@ -46,6 +49,7 @@ class Engram:
             self.store = EventStore(self.conn)
             self.raw_log = SegmentedRawLog(self.root / "raw")
             self.projector = Projector(self.store)
+            self.canonical_worker = CanonicalWorker(self.store, self.extractor)
             self.queue: queue.Queue[QueueItem] = queue.Queue(maxsize=queue_max_size)
             self.recovery = RecoveryService(
                 raw_log=self.raw_log,
@@ -113,7 +117,7 @@ class Engram:
         observed = ensure_utc(observed_at, "observed_at")
         effective_start = ensure_utc(effective_at_start, "effective_at_start") if effective_at_start else None
         effective_end = ensure_utc(effective_at_end, "effective_at_end") if effective_at_end else None
-        self._validate_event(event_type, data)
+        validate_event(event_type, data)
 
         with self.store.transaction() as tx:
             recorded_at = utcnow()
@@ -135,8 +139,8 @@ class Engram:
                 caused_by=None,
                 schema_version=1,
             )
-            event_entities = self._derive_event_entities(event)
-            dirty_rows = self._derive_dirty_rows(event, event_entities)
+            event_entities = derive_event_entities(event)
+            dirty_rows = derive_dirty_rows(event, event_entities)
             self.store.append_event(tx, event)
             self.store.append_event_entities(tx, event.id, event_entities)
             self.store.mark_dirty(tx, dirty_rows)
@@ -218,8 +222,18 @@ class Engram:
         self,
         level: Literal["raw", "canonical", "projection", "index"] = "projection",
     ) -> None:
-        if level in {"raw", "canonical"}:
+        if level == "raw":
             return
+        if level == "canonical":
+            while True:
+                try:
+                    item = self.queue.get_nowait()
+                except queue.Empty:
+                    return
+                try:
+                    self.canonical_worker.process(item)
+                finally:
+                    self.queue.task_done()
         if level == "projection":
             while self.store.count_dirty_ranges() > 0:
                 rebuilt = self.projector.rebuild_dirty()
@@ -229,58 +243,3 @@ class Engram:
         if level == "index":
             raise NotImplementedError("flush(level='index') is planned for semantic indexing")
         raise ValidationError(f"unsupported flush level: {level}")
-
-    def _validate_event(self, event_type: str, data: dict) -> None:
-        if event_type == "entity.create":
-            if not isinstance(data.get("id"), str) or not isinstance(data.get("type"), str):
-                raise ValidationError("entity.create requires string id and type")
-            if not isinstance(data.get("attrs"), dict):
-                raise ValidationError("entity.create requires attrs dict")
-            return
-        if event_type == "entity.update":
-            if not isinstance(data.get("id"), str):
-                raise ValidationError("entity.update requires string id")
-            if not isinstance(data.get("attrs"), dict):
-                raise ValidationError("entity.update requires attrs dict")
-            return
-        if event_type == "entity.delete":
-            if not isinstance(data.get("id"), str):
-                raise ValidationError("entity.delete requires string id")
-            return
-        if event_type in {"relation.create", "relation.update"}:
-            raise ValidationError(f"{event_type} is planned but not implemented in Phase 1")
-        if event_type == "relation.delete":
-            raise ValidationError("relation.delete is planned but not implemented in Phase 1")
-        raise ValidationError(f"unsupported event type: {event_type}")
-
-    def _derive_event_entities(self, event: Event) -> list[tuple[str, str]]:
-        if event.type.startswith("entity."):
-            return [(event.data["id"], "subject")]
-        return [
-            (event.data["source"], "source"),
-            (event.data["target"], "target"),
-        ]
-
-    def _derive_dirty_rows(
-        self,
-        event: Event,
-        event_entities: list[tuple[str, str]],
-    ) -> list[DirtyRangeRow]:
-        created_at = to_rfc3339(utcnow())
-        from_recorded_at = to_rfc3339(event.recorded_at)
-        from_effective_at = (
-            to_rfc3339(event.effective_at_start) if event.effective_at_start else None
-        )
-        rows: list[DirtyRangeRow] = []
-        for entity_id, _role in event_entities:
-            rows.append(
-                (
-                    str(uuid4()),
-                    entity_id,
-                    from_recorded_at,
-                    from_effective_at,
-                    f"{event.type}:{event.id}",
-                    created_at,
-                )
-            )
-        return rows

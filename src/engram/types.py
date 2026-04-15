@@ -7,6 +7,7 @@ from typing import Any, Literal
 
 SourceRole = Literal["user", "assistant", "tool", "system", "manual"]
 TimeConfidence = Literal["exact", "inferred", "unknown"]
+ExtractionRunStatus = Literal["SUCCEEDED", "FAILED", "SKIPPED"]
 
 
 @dataclass(slots=True)
@@ -69,6 +70,32 @@ class Event:
 
 
 @dataclass(slots=True)
+class ExtractedEvent:
+    type: str
+    data: dict[str, Any]
+    effective_at_start: datetime | None = None
+    effective_at_end: datetime | None = None
+    source_role: SourceRole = "user"
+    confidence: float | None = None
+    reason: str | None = None
+    time_confidence: TimeConfidence = "unknown"
+
+
+@dataclass(slots=True)
+class ExtractionRun:
+    id: str
+    source_turn_id: str
+    extractor_version: str
+    observed_at: datetime
+    processed_at: datetime
+    status: ExtractionRunStatus
+    error: str | None
+    event_count: int
+    superseded_at: datetime | None
+    projection_version: int | None
+
+
+@dataclass(slots=True)
 class Entity:
     id: str
     type: str
@@ -102,4 +129,3 @@ class HistoryEntry:
     confidence: float | None
     basis: Literal["known", "valid"]
     event_id: str
-

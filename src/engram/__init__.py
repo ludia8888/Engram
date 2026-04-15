@@ -1,8 +1,21 @@
+from .canonical import Extractor, NullExtractor
 from .engram import Engram
 from .errors import EngramError, QueueFullError, ValidationError, WriterLockError
-from .types import Entity, Event, HistoryEntry, QueueItem, RawTurn, TemporalEntityView, TurnAck
+from .types import (
+    Entity,
+    Event,
+    ExtractedEvent,
+    ExtractionRun,
+    HistoryEntry,
+    QueueItem,
+    RawTurn,
+    TemporalEntityView,
+    TurnAck,
+)
 
 __all__ = [
+    "Extractor",
+    "NullExtractor",
     "Engram",
     "EngramError",
     "QueueFullError",
@@ -10,10 +23,11 @@ __all__ = [
     "WriterLockError",
     "Entity",
     "Event",
+    "ExtractedEvent",
+    "ExtractionRun",
     "HistoryEntry",
     "QueueItem",
     "RawTurn",
     "TemporalEntityView",
     "TurnAck",
 ]
-

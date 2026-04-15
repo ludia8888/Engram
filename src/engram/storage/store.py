@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, TypeAlias
 
 from engram.time_utils import from_rfc3339, to_rfc3339
-from engram.types import Entity, Event
+from engram.types import Entity, Event, ExtractionRun
 
 DirtyRangeRow: TypeAlias = tuple[str, str, str, str | None, str, str]
 
@@ -120,6 +120,10 @@ class EventStore:
         row = self.conn.execute("SELECT COUNT(*) FROM events").fetchone()
         return int(row[0])
 
+    def count_extraction_runs(self) -> int:
+        row = self.conn.execute("SELECT COUNT(*) FROM extraction_runs").fetchone()
+        return int(row[0])
+
     def count_dirty_ranges(self) -> int:
         row = self.conn.execute("SELECT COUNT(*) FROM dirty_ranges").fetchone()
         return int(row[0])
@@ -160,15 +164,75 @@ class EventStore:
         ).fetchall()
         return [str(row[0]) for row in rows]
 
-    def source_turn_ids(self) -> set[str]:
+    def successful_source_turn_ids(self) -> set[str]:
         rows = self.conn.execute(
             """
             SELECT DISTINCT source_turn_id
-            FROM events
-            WHERE source_turn_id IS NOT NULL
+            FROM extraction_runs
+            WHERE status = 'SUCCEEDED'
             """
         ).fetchall()
         return {str(row[0]) for row in rows}
+
+    def has_successful_extraction_run(self, source_turn_id: str, extractor_version: str) -> bool:
+        row = self.conn.execute(
+            """
+            SELECT 1
+            FROM extraction_runs
+            WHERE source_turn_id = ?
+              AND extractor_version = ?
+              AND status = 'SUCCEEDED'
+            LIMIT 1
+            """,
+            (source_turn_id, extractor_version),
+        ).fetchone()
+        return row is not None
+
+    def append_extraction_run(self, tx: sqlite3.Connection, run: ExtractionRun) -> None:
+        tx.execute(
+            """
+            INSERT INTO extraction_runs(
+                id, source_turn_id, extractor_version, observed_at, processed_at,
+                status, error, event_count, superseded_at, projection_version
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                run.id,
+                run.source_turn_id,
+                run.extractor_version,
+                to_rfc3339(run.observed_at),
+                to_rfc3339(run.processed_at),
+                run.status,
+                run.error,
+                run.event_count,
+                to_rfc3339(run.superseded_at) if run.superseded_at else None,
+                run.projection_version,
+            ),
+        )
+
+    def list_extraction_runs(self) -> list[ExtractionRun]:
+        rows = self.conn.execute(
+            """
+            SELECT *
+            FROM extraction_runs
+            ORDER BY processed_at ASC, id ASC
+            """
+        ).fetchall()
+        return [
+            ExtractionRun(
+                id=row["id"],
+                source_turn_id=row["source_turn_id"],
+                extractor_version=row["extractor_version"],
+                observed_at=from_rfc3339(row["observed_at"]),
+                processed_at=from_rfc3339(row["processed_at"]),
+                status=row["status"],
+                error=row["error"],
+                event_count=int(row["event_count"]),
+                superseded_at=from_rfc3339(row["superseded_at"]) if row["superseded_at"] else None,
+                projection_version=int(row["projection_version"]) if row["projection_version"] is not None else None,
+            )
+            for row in rows
+        ]
 
     def entity_events_visible_at(self, entity_id: str, recorded_at: str) -> list[Event]:
         rows = self.conn.execute(

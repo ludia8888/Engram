@@ -30,7 +30,7 @@ class RecoveryService:
             if rebuilt == 0 and self.store.count_dirty_ranges() > 0:
                 raise RuntimeError("startup projection recovery made no progress")
 
-        processed_turn_ids = self.store.source_turn_ids()
+        processed_turn_ids = self.store.successful_source_turn_ids()
         enqueued = 0
         for turn in self.raw_log.raw_all():
             if turn.id in processed_turn_ids:

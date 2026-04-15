@@ -38,7 +38,7 @@ def test_flush_projection_rebuilds_snapshot_and_clears_dirty_ranges(tmp_path):
     mem.close()
 
 
-def test_flush_canonical_and_projection_do_not_promote_raw_turns_without_extractor(tmp_path):
+def test_flush_canonical_with_default_extractor_does_not_create_events(tmp_path):
     mem = Engram(user_id="alice", path=str(tmp_path))
     mem.turn(
         user="지난주에 부산으로 이사했어",
@@ -48,6 +48,8 @@ def test_flush_canonical_and_projection_do_not_promote_raw_turns_without_extract
 
     mem.flush("canonical")
     assert mem.store.count_events() == 0
+    assert mem.store.count_extraction_runs() == 1
+    assert mem.queue.qsize() == 0
 
     mem.flush("projection")
     assert mem.store.count_events() == 0

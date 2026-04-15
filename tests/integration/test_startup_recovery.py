@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from engram import Engram, QueueFullError
+from engram.types import ExtractedEvent
 
 from tests.conftest import dt
 
@@ -27,27 +28,33 @@ def test_startup_catch_up_requeues_raw_turns_without_canonical_events(tmp_path):
 
 
 def test_startup_catch_up_skips_turns_already_linked_to_canonical_events(tmp_path):
-    first = Engram(user_id="alice", path=str(tmp_path))
-    ack = first.turn(
+    class StaticExtractor:
+        version = "startup-test-v1"
+
+        def extract(self, item):
+            return [
+                ExtractedEvent(
+                    type="entity.create",
+                    data={
+                        "id": "user:alice",
+                        "type": "user",
+                        "attrs": {"diet": "vegetarian"},
+                    },
+                    source_role="user",
+                    time_confidence="exact",
+                )
+            ]
+
+    first = Engram(user_id="alice", path=str(tmp_path), extractor=StaticExtractor())
+    first.turn(
         user="난 채식주의자야",
         assistant="알겠어, 식단 선호로 기억할게.",
         observed_at=dt("2026-05-01T10:00:00Z"),
     )
-    first.append(
-        "entity.create",
-        {
-            "id": "user:alice",
-            "type": "user",
-            "attrs": {"diet": "vegetarian"},
-        },
-        observed_at=dt("2026-05-01T10:00:00Z"),
-        source_turn_id=ack.turn_id,
-        source_role="user",
-        time_confidence="exact",
-    )
+    first.flush("canonical")
     first.close()
 
-    second = Engram(user_id="alice", path=str(tmp_path))
+    second = Engram(user_id="alice", path=str(tmp_path), extractor=StaticExtractor())
 
     assert second.queue.qsize() == 0
 
