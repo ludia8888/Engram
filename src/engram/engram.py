@@ -13,6 +13,8 @@ from .event_ops import derive_dirty_rows, derive_event_entities, validate_event
 from .projector import Projector
 from .recovery import RecoveryService
 from .retrieval import RetrievalEngine
+from .semantic import Embedder, HashEmbedder
+from .semantic_index import SemanticIndexer
 from .storage import EventStore, SegmentedRawLog, WriterLock, open_connection
 from .storage.store import valid_event_sort_key
 from .time_utils import ensure_utc, to_rfc3339, utcnow
@@ -33,6 +35,7 @@ class Engram:
         queue_max_size: int = 10000,
         queue_put_timeout: float = 1.0,
         extractor: Extractor | None = None,
+        embedder: Embedder | None = None,
     ):
         base_root = Path(path) if path else Path.home() / ".engram" / "users"
         self.user_id = user_id
@@ -43,6 +46,7 @@ class Engram:
         self.session_id = session_id
         self.queue_put_timeout = queue_put_timeout
         self.extractor = extractor or NullExtractor()
+        self.embedder = embedder or HashEmbedder()
 
         self._writer_lock = WriterLock(self.root / ".writer.lock")
         self.conn = None
@@ -53,7 +57,8 @@ class Engram:
             self.raw_log = SegmentedRawLog(self.root / "raw")
             self.projector = Projector(self.store)
             self.canonical_worker = CanonicalWorker(self.store, self.extractor)
-            self.retrieval = RetrievalEngine(self.store)
+            self.semantic_indexer = SemanticIndexer(self.store, self.embedder)
+            self.retrieval = RetrievalEngine(self.store, self.embedder)
             self.context_builder = ContextBuilder(self.store, self.raw_log.raw_get)
             self.queue: queue.Queue[QueueItem] = queue.Queue(maxsize=queue_max_size)
             self.recovery = RecoveryService(
@@ -367,5 +372,6 @@ class Engram:
                     raise RuntimeError("projection flush made no progress")
             return
         if level == "index":
-            raise NotImplementedError("flush(level='index') is planned for semantic indexing")
+            self.semantic_indexer.index_missing()
+            return
         raise ValidationError(f"unsupported flush level: {level}")

@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import pytest
-
 from engram import Engram
 
 from tests.conftest import dt
@@ -54,14 +52,5 @@ def test_flush_canonical_with_default_extractor_does_not_create_events(tmp_path)
     mem.flush("projection")
     assert mem.store.count_events() == 0
     assert dict(mem.projector.current_snapshot()) == {}
-
-    mem.close()
-
-
-def test_flush_index_is_not_implemented_yet(tmp_path):
-    mem = Engram(user_id="alice", path=str(tmp_path))
-
-    with pytest.raises(NotImplementedError):
-        mem.flush("index")
 
     mem.close()

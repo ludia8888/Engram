@@ -76,3 +76,14 @@ CREATE TABLE IF NOT EXISTS snapshots (
     state_blob                 BLOB NOT NULL,
     relation_blob              BLOB NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS vec_events (
+    event_id           TEXT NOT NULL,
+    embedder_version   TEXT NOT NULL,
+    dim                INTEGER NOT NULL,
+    embedding          BLOB NOT NULL,
+    indexed_at         TEXT NOT NULL,
+    PRIMARY KEY(event_id, embedder_version)
+);
+
+CREATE INDEX IF NOT EXISTS idx_vec_events_version ON vec_events(embedder_version);
