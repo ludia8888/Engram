@@ -991,6 +991,7 @@ query
 현재 구현된 최소형:
 - semantic index 없이 canonical `events`를 직접 스캔한다.
 - query token과 event `type/data/reason/source_role`의 lexical match로 seed event를 만든다.
+- 한국어 query는 조사/어미가 붙은 일부 어절에 대해 간단한 suffix normalization을 적용한다.
 - seed event를 `event_entities`로 entity 후보에 투영한다.
 - 결과는 entity별 supporting event 집합으로 반환한다.
 - `known` mode의 `time_window`는 `recorded_at` 기준으로만 적용된다.

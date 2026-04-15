@@ -5,19 +5,52 @@ import re
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Iterable
 
 from .storage.store import EventStore
 from .time_utils import to_rfc3339, utcnow
 from .types import Event, SearchResult
 
 _TOKEN_RE = re.compile(r"[0-9A-Za-z가-힣:_-]+")
+_KOREAN_SUFFIXES = (
+    "으로는",
+    "으로도",
+    "으로",
+    "에서",
+    "에게",
+    "한테",
+    "이랑",
+    "처럼",
+    "까지",
+    "부터",
+    "보다",
+    "에는",
+    "에도",
+    "으로",
+    "은",
+    "는",
+    "이",
+    "가",
+    "을",
+    "를",
+    "와",
+    "과",
+    "로",
+    "도",
+    "만",
+    "야",
+)
 
 
 @dataclass(slots=True)
 class ScoredEvent:
     event: Event
     score: float
+
+
+@dataclass(frozen=True, slots=True)
+class QueryToken:
+    raw: str
+    variants: tuple[str, ...]
 
 
 class RetrievalEngine:
@@ -84,19 +117,37 @@ class RetrievalEngine:
         return results[:k]
 
 
-def _query_tokens(query: str) -> list[str]:
-    return [token.lower() for token in _TOKEN_RE.findall(query) if token.strip()]
+def _query_tokens(query: str) -> list[QueryToken]:
+    tokens: list[QueryToken] = []
+    for raw_token in _TOKEN_RE.findall(query):
+        token = raw_token.lower().strip()
+        if not token:
+            continue
+        variants = [token]
+        if _contains_hangul(token):
+            for suffix in _KOREAN_SUFFIXES:
+                if token.endswith(suffix):
+                    stem = token[: -len(suffix)]
+                    if len(stem) >= 2:
+                        variants.append(stem)
+        deduped = tuple(dict.fromkeys(variants))
+        tokens.append(QueryToken(raw=token, variants=deduped))
+    return tokens
 
 
-def _score_event(event: Event, tokens: Iterable[str]) -> ScoredEvent:
+def _score_event(event: Event, tokens: list[QueryToken]) -> ScoredEvent:
     haystack = _event_haystack(event)
-    token_list = list(tokens)
-    matched = [token for token in token_list if token in haystack]
+    matched = [
+        token
+        for token in tokens
+        if any(variant in haystack for variant in token.variants)
+    ]
     if not matched:
         return ScoredEvent(event=event, score=0.0)
 
-    score = len(set(matched)) / max(len(set(token_list)), 1)
-    if haystack.find(" ".join(token_list)) >= 0:
+    score = len(matched) / max(len(tokens), 1)
+    phrase = " ".join(token.raw for token in tokens)
+    if phrase and phrase in haystack:
         score += 0.25
     return ScoredEvent(event=event, score=score)
 
@@ -109,3 +160,7 @@ def _event_haystack(event: Event) -> str:
         event.source_role,
     ]
     return " ".join(parts).lower()
+
+
+def _contains_hangul(value: str) -> bool:
+    return any("\uac00" <= ch <= "\ud7a3" for ch in value)

@@ -60,7 +60,7 @@ def test_search_respects_known_time_window(tmp_path, monkeypatch):
         source_role="manual",
     )
     monkeypatch.setattr(engram_module, "utcnow", lambda: dt("2026-05-10T10:00:00Z"))
-    mem.append(
+    moved_event_id = mem.append(
         "entity.update",
         {"id": "user:alice", "attrs": {"location": "Busan"}},
         observed_at=dt("2026-05-10T10:00:00Z"),
@@ -80,6 +80,31 @@ def test_search_respects_known_time_window(tmp_path, monkeypatch):
     assert early == []
     assert late[0].entity_id == "user:alice"
     assert "temporal" in late[0].matched_axes
+    assert moved_event_id in late[0].supporting_event_ids
+
+    mem.close()
+
+
+def test_search_normalizes_korean_particles_for_lexical_match(tmp_path, monkeypatch):
+    mem = Engram(user_id="alice", path=str(tmp_path))
+    monkeypatch.setattr(engram_module, "utcnow", lambda: dt("2026-05-10T10:00:00Z"))
+    moved_event_id = mem.append(
+        "entity.create",
+        {"id": "user:alice", "type": "user", "attrs": {"location": "부산"}},
+        observed_at=dt("2026-05-10T10:00:00Z"),
+        reason="사용자가 부산으로 이사했다고 말했다",
+        source_role="user",
+    )
+
+    results = mem.search(
+        "부산에서 뭐 먹지",
+        k=5,
+        time_window=(dt("2026-05-01T00:00:00Z"), dt("2026-05-15T00:00:00Z")),
+    )
+
+    assert results
+    assert results[0].entity_id == "user:alice"
+    assert moved_event_id in results[0].supporting_event_ids
 
     mem.close()
 

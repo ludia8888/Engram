@@ -5,7 +5,7 @@ from datetime import datetime
 
 from .storage.store import EventStore
 from .time_utils import to_rfc3339, utcnow
-from .types import RawTurn, SearchResult, TemporalEntityView
+from .types import Event, RawTurn, SearchResult, TemporalEntityView
 
 
 class ContextBuilder:
@@ -25,6 +25,7 @@ class ContextBuilder:
         get_known_at,
     ) -> str:
         basis_time = as_of or utcnow()
+        supporting_events = self.store.events_by_ids(_supporting_event_ids(results))
         sections: list[list[str]] = [
             [
                 "## Memory Basis",
@@ -45,7 +46,7 @@ class ContextBuilder:
 
         if include_history:
             change_lines = ["## Relevant Changes"]
-            for event in self.store.events_by_ids(_supporting_event_ids(results)):
+            for event in supporting_events:
                 if event.type == "entity.delete":
                     change_lines.append(
                         f"- {event.data['id']} deleted at {to_rfc3339(event.recorded_at)}"
@@ -64,17 +65,17 @@ class ContextBuilder:
 
         if include_raw:
             raw_lines = ["## Raw Evidence"]
-            for turn in self._raw_turns_for_results(results):
+            for turn in self._raw_turns_for_events(supporting_events):
                 raw_lines.append(f'- [{to_rfc3339(turn.observed_at)}] "{turn.user}"')
             if len(raw_lines) > 1:
                 sections.append(raw_lines)
 
         return _truncate_sections(sections, max_tokens)
 
-    def _raw_turns_for_results(self, results: list[SearchResult]) -> list[RawTurn]:
+    def _raw_turns_for_events(self, events: list[Event]) -> list[RawTurn]:
         turns: list[RawTurn] = []
         seen_turn_ids: set[str] = set()
-        for event in self.store.events_by_ids(_supporting_event_ids(results)):
+        for event in events:
             if event.source_turn_id is None or event.source_turn_id in seen_turn_ids:
                 continue
             turn = self.raw_get(event.source_turn_id)
