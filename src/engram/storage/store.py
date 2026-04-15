@@ -403,7 +403,7 @@ class EventStore:
             if event.type == "entity.create":
                 entity_type = event.data["type"]
 
-            if not _covers_valid_time(event, at):
+            if not covers_valid_time(event, at):
                 if _has_unknown_effective_time(event):
                     unknown_attrs = _merge_unknown_attrs(unknown_attrs, event.data.get("attrs", {}).keys())
                 continue
@@ -454,7 +454,7 @@ class EventStore:
         )
 
 
-def _covers_valid_time(event: Event, at: datetime) -> bool:
+def covers_valid_time(event: Event, at: datetime) -> bool:
     if _has_unknown_effective_time(event):
         return False
     start = event.effective_at_start
@@ -464,6 +464,25 @@ def _covers_valid_time(event: Event, at: datetime) -> bool:
     if start > at:
         return False
     if end is not None and at >= end:
+        return False
+    return True
+
+
+def overlaps_valid_time_window(
+    event: Event,
+    start_at: datetime,
+    end_at: datetime,
+) -> bool:
+    if _has_unknown_effective_time(event):
+        return False
+
+    start = event.effective_at_start
+    end = event.effective_at_end
+    if start is None:
+        return False
+    if end is not None and end <= start_at:
+        return False
+    if start >= end_at:
         return False
     return True
 

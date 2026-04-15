@@ -24,12 +24,57 @@ class ContextBuilder:
         include_raw: bool,
         get_known_at,
     ) -> str:
+        return self._build(
+            mode="known",
+            query=query,
+            results=results,
+            as_of=as_of,
+            max_tokens=max_tokens,
+            include_history=include_history,
+            include_raw=include_raw,
+            get_view=get_known_at,
+        )
+
+    def build_valid(
+        self,
+        *,
+        query: str,
+        results: list[SearchResult],
+        as_of: datetime | None,
+        max_tokens: int,
+        include_history: bool,
+        include_raw: bool,
+        get_valid_at,
+    ) -> str:
+        return self._build(
+            mode="valid",
+            query=query,
+            results=results,
+            as_of=as_of,
+            max_tokens=max_tokens,
+            include_history=include_history,
+            include_raw=include_raw,
+            get_view=get_valid_at,
+        )
+
+    def _build(
+        self,
+        *,
+        mode: str,
+        query: str,
+        results: list[SearchResult],
+        as_of: datetime | None,
+        max_tokens: int,
+        include_history: bool,
+        include_raw: bool,
+        get_view,
+    ) -> str:
         basis_time = as_of or utcnow()
         supporting_events = self.store.events_by_ids(_supporting_event_ids(results))
         sections: list[list[str]] = [
             [
                 "## Memory Basis",
-                "- mode: known",
+                f"- mode: {mode}",
                 f"- as_of: {to_rfc3339(basis_time)}",
                 f"- query: {query}",
             ]
@@ -37,26 +82,30 @@ class ContextBuilder:
 
         current_state = ["## Current State"]
         for result in results:
-            view: TemporalEntityView | None = get_known_at(result.entity_id, basis_time)
+            view: TemporalEntityView | None = get_view(result.entity_id, basis_time)
             if view is None:
                 continue
-            current_state.append(f"- {view.entity_id} ({view.entity_type}) attrs={view.attrs}")
+            line = f"- {view.entity_id} ({view.entity_type}) attrs={view.attrs}"
+            if view.unknown_attrs:
+                line += f" unknown_attrs={view.unknown_attrs}"
+            current_state.append(line)
         if len(current_state) > 1:
             sections.append(current_state)
 
         if include_history:
             change_lines = ["## Relevant Changes"]
             for event in supporting_events:
+                time_label = _event_time_label(event, mode)
                 if event.type == "entity.delete":
                     change_lines.append(
-                        f"- {event.data['id']} deleted at {to_rfc3339(event.recorded_at)}"
+                        f"- {event.data['id']} deleted {time_label}"
                     )
                     continue
                 attrs = event.data.get("attrs", {})
                 if not attrs:
                     continue
                 change_lines.append(
-                    f"- {event.data['id']} {attrs} recorded_at={to_rfc3339(event.recorded_at)} "
+                    f"- {event.data['id']} {attrs} {time_label} "
                     f"confidence={event.confidence if event.confidence is not None else 'unknown'} "
                     f"reason={event.reason or 'n/a'}"
                 )
@@ -100,6 +149,19 @@ def _supporting_event_ids(results: list[SearchResult]) -> list[str]:
 
 def _estimate_tokens(text: str) -> int:
     return max(1, math.ceil(len(text) / 4))
+
+
+def _event_time_label(event: Event, mode: str) -> str:
+    if mode == "valid":
+        if event.effective_at_start is None:
+            return "effective_at=unknown"
+        if event.effective_at_end is None:
+            return f"effective_at={to_rfc3339(event.effective_at_start)}"
+        return (
+            f"effective_at={to_rfc3339(event.effective_at_start)}"
+            f"..{to_rfc3339(event.effective_at_end)}"
+        )
+    return f"recorded_at={to_rfc3339(event.recorded_at)}"
 
 
 def _truncate_sections(sections: list[list[str]], max_tokens: int) -> str:

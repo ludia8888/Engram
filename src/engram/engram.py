@@ -274,9 +274,11 @@ class Engram:
         time_window=None,
         k: int = 20,
     ) -> list[SearchResult]:
-        if time_mode != "known":
-            raise ValidationError("valid time_mode is planned but not implemented yet")
-        return self.retrieval.search_known(query, k=k, time_window=time_window)
+        if time_mode == "known":
+            return self.retrieval.search_known(query, k=k, time_window=time_window)
+        if time_mode == "valid":
+            return self.retrieval.search_valid(query, k=k, time_window=time_window)
+        raise ValidationError(f"unsupported time_mode: {time_mode}")
 
     def context(
         self,
@@ -288,19 +290,29 @@ class Engram:
         include_history: bool = True,
         include_raw: bool = False,
     ) -> str:
-        if time_mode != "known":
-            raise ValidationError("valid time_mode is planned but not implemented yet")
         as_of = time_window[1] if time_window else utcnow()
         results = self.search(query, time_mode=time_mode, time_window=time_window, k=5)
-        return self.context_builder.build_known(
-            query=query,
-            results=results,
-            as_of=as_of,
-            max_tokens=max_tokens,
-            include_history=include_history,
-            include_raw=include_raw,
-            get_known_at=self.get_known_at,
-        )
+        if time_mode == "known":
+            return self.context_builder.build_known(
+                query=query,
+                results=results,
+                as_of=as_of,
+                max_tokens=max_tokens,
+                include_history=include_history,
+                include_raw=include_raw,
+                get_known_at=self.get_known_at,
+            )
+        if time_mode == "valid":
+            return self.context_builder.build_valid(
+                query=query,
+                results=results,
+                as_of=as_of,
+                max_tokens=max_tokens,
+                include_history=include_history,
+                include_raw=include_raw,
+                get_valid_at=self.get_valid_at,
+            )
+        raise ValidationError(f"unsupported time_mode: {time_mode}")
 
     def flush(
         self,

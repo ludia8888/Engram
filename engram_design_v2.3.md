@@ -170,7 +170,7 @@ history = mem.known_history("user:alice")
 - 현재 구조화 메모리는 `append()`와 `get_known_at()` 중심으로 검증된다.
 - `flush("projection")`은 이미 커밋된 canonical 이벤트만 내부 projection snapshot에 반영한다.
 - 앱이 다시 시작되면 raw에만 있고 아직 `현재 extractor version` 기준 successful extraction run이 없는 turn은 startup catch-up으로 다시 큐에 올라간다.
-- `search()`와 `context()`는 현재 `known` 모드만 구현됐고, semantic index 없이 canonical 이벤트를 직접 스캔하는 최소형이다.
+- `search()`와 `context()`는 현재 `known`/`valid` 모드의 최소형이 구현됐고, semantic index 없이 canonical 이벤트를 직접 스캔한다.
 
 ### 2.4 로드맵 예시 API
 
@@ -744,8 +744,9 @@ def valid_history(self, entity_id: str, attr: str | None = None) -> list[History
 Status:
 - `search(..., time_mode="known")` = `Implemented (Phase 3 PR1)`
 - `context(..., time_mode="known")` = `Implemented (Phase 3 PR1)`
+- `search(..., time_mode="valid")` = `Implemented (Phase 4 PR2)`
+- `context(..., time_mode="valid")` = `Implemented (Phase 4 PR2)`
 - semantic / causal ranking = `Planned (Phase 3+)`
-- `search/context time_mode="valid"` = `Planned (Phase 4+)`
 
 ```python
 def search(
@@ -775,9 +776,12 @@ def context(
 - `search()`는 canonical 이벤트를 직접 읽는 event-seeded lexical retrieval이다.
 - 지원 축은 현재 `entity`와 optional `temporal`뿐이다.
 - `semantic`, `causal` 축은 아직 결과 집계에 포함되지 않는다.
-- `time_mode="valid"`는 아직 `ValidationError`로 거절한다.
+- `time_mode="known"`는 `recorded_at` 기준 lexical retrieval이다.
+- `time_mode="valid"`는 `effective_at_*` 기준 lexical retrieval이다.
+- `time_mode="valid"`에서는 `effective_at_start`가 없는 이벤트를 seed에서 제외한다.
 - `context()`는 `search()` 결과를 바탕으로 `Memory Basis / Current State / Relevant Changes / Raw Evidence` 섹션을 만든다.
 - `include_raw=True`일 때만 `source_turn_id`를 따라 raw evidence를 붙인다.
+- `context(time_mode="valid")`는 `Current State`에 `unknown_attrs`를 함께 노출한다.
 
 ### 7.7 Maintenance API
 
@@ -995,6 +999,8 @@ query
 - seed event를 `event_entities`로 entity 후보에 투영한다.
 - 결과는 entity별 supporting event 집합으로 반환한다.
 - `known` mode의 `time_window`는 `recorded_at` 기준으로만 적용된다.
+- `valid` mode의 `time_window`는 `effective_at_*` overlap 기준으로 적용된다.
+- `valid` mode는 `effective_at_start`가 없는 이벤트를 검색 seed에서 제외하고, 불확실성은 `context()`의 `unknown_attrs`에서 보완한다.
 
 ### 10.2 Run visibility 필터
 
@@ -1141,7 +1147,7 @@ def restore_known_to(at: datetime) -> StateCache:
 - `get_valid_at()`는 entity-local replay만 구현한다.
 - 정렬 기준은 `effective_at_start`, 그다음 `recorded_at`, `seq`다.
 - `effective_at_start`가 없는 이벤트는 valid apply에서 제외하고 `unknown_attrs`로 보낸다.
-- `search()/context()`의 `valid` 모드는 아직 연결되지 않았다.
+- `search()/context()`도 현재는 같은 valid-time 최소 규칙을 사용한다.
 
 ### 12.4 Projector
 

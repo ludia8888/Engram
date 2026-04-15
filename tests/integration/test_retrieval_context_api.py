@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import pytest
-
-from engram import Engram, ValidationError
+from engram import Engram
 import engram.engram as engram_module
 
 from tests.conftest import dt
@@ -155,13 +153,112 @@ def test_context_builds_known_time_memory_summary_and_optional_raw(tmp_path):
     mem.close()
 
 
-def test_search_and_context_reject_valid_mode_for_now(tmp_path):
+def test_search_respects_valid_time_window(tmp_path):
     mem = Engram(user_id="alice", path=str(tmp_path))
+    mem.append(
+        "entity.create",
+        {"id": "user:alice", "type": "user", "attrs": {"location": "Seoul"}},
+        observed_at=dt("2026-05-01T10:00:00Z"),
+        effective_at_start=dt("2026-05-01T00:00:00Z"),
+        time_confidence="exact",
+    )
+    moved_event_id = mem.append(
+        "entity.update",
+        {"id": "user:alice", "attrs": {"location": "Busan"}},
+        observed_at=dt("2026-05-10T10:00:00Z"),
+        effective_at_start=dt("2026-05-08T00:00:00Z"),
+        time_confidence="exact",
+        reason="moved to Busan",
+    )
 
-    with pytest.raises(ValidationError, match="valid time_mode is planned"):
-        mem.search("Busan", time_mode="valid")
+    early = mem.search(
+        "Busan",
+        time_mode="valid",
+        time_window=(dt("2026-05-01T00:00:00Z"), dt("2026-05-05T00:00:00Z")),
+    )
+    late = mem.search(
+        "Busan",
+        time_mode="valid",
+        time_window=(dt("2026-05-08T00:00:00Z"), dt("2026-05-15T00:00:00Z")),
+    )
 
-    with pytest.raises(ValidationError, match="valid time_mode is planned"):
-        mem.context("Busan", time_mode="valid")
+    assert early == []
+    assert late[0].entity_id == "user:alice"
+    assert late[0].time_basis == "valid"
+    assert "temporal" in late[0].matched_axes
+    assert moved_event_id in late[0].supporting_event_ids
+
+    mem.close()
+
+
+def test_search_valid_skips_unknown_effective_time_events(tmp_path):
+    mem = Engram(user_id="alice", path=str(tmp_path))
+    mem.append(
+        "entity.create",
+        {"id": "user:alice", "type": "user", "attrs": {"diet": "vegetarian"}},
+        observed_at=dt("2026-05-01T10:00:00Z"),
+        effective_at_start=dt("2026-05-01T00:00:00Z"),
+        time_confidence="exact",
+    )
+    mem.append(
+        "entity.update",
+        {"id": "user:alice", "attrs": {"location": "Busan"}},
+        observed_at=dt("2026-05-10T10:00:00Z"),
+        time_confidence="unknown",
+        reason="location mentioned without exact effective time",
+    )
+
+    results = mem.search("Busan", time_mode="valid")
+
+    assert results == []
+
+    mem.close()
+
+
+def test_context_builds_valid_time_memory_summary(tmp_path):
+    mem = Engram(user_id="alice", path=str(tmp_path))
+    ack = mem.turn(
+        user="나는 채식주의자고, 부산에 있는 것 같긴 한데 정확한 날짜는 잘 모르겠어",
+        assistant="좋아, 시간 확실한 정보와 불확실한 정보를 나눠서 기억해둘게.",
+        observed_at=dt("2026-05-12T09:00:00Z"),
+    )
+    mem.append(
+        "entity.create",
+        {"id": "user:alice", "type": "user", "attrs": {"diet": "vegetarian"}},
+        observed_at=dt("2026-05-01T10:00:00Z"),
+        effective_at_start=dt("2026-05-01T00:00:00Z"),
+        source_turn_id=ack.turn_id,
+        source_role="user",
+        time_confidence="exact",
+        reason="diet is known to be active from May 1",
+    )
+    mem.append(
+        "entity.update",
+        {"id": "user:alice", "attrs": {"location": "Busan"}},
+        observed_at=dt("2026-05-12T09:00:00Z"),
+        source_turn_id=ack.turn_id,
+        source_role="user",
+        time_confidence="unknown",
+        reason="location was mentioned but effective time is unknown",
+    )
+
+    text = mem.context(
+        "vegetarian meal ideas",
+        time_mode="valid",
+        time_window=(dt("2026-05-01T00:00:00Z"), dt("2026-05-15T00:00:00Z")),
+        include_raw=True,
+        max_tokens=400,
+    )
+
+    assert "## Memory Basis" in text
+    assert "- mode: valid" in text
+    assert "## Current State" in text
+    assert "user:alice" in text
+    assert "vegetarian" in text
+    assert "unknown_attrs=['location']" in text
+    assert "## Relevant Changes" in text
+    assert "effective_at=2026-05-01T00:00:00Z" in text
+    assert "## Raw Evidence" in text
+    assert "나는 채식주의자고" in text
 
     mem.close()

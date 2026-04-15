@@ -6,7 +6,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
 
-from .storage.store import EventStore
+from .storage.store import EventStore, covers_valid_time, overlaps_valid_time_window, valid_event_sort_key
 from .time_utils import to_rfc3339, utcnow
 from .types import Event, SearchResult
 
@@ -110,6 +110,74 @@ class RetrievalEngine:
                     matched_axes=matched_axes,
                     supporting_event_ids=[item.event.id for item in ranked_events[:5]],
                     time_basis="known",
+                )
+            )
+
+        results.sort(key=lambda item: (-item.score, item.entity_id))
+        return results[:k]
+
+    def search_valid(
+        self,
+        query: str,
+        *,
+        k: int,
+        time_window: tuple[datetime, datetime] | None = None,
+    ) -> list[SearchResult]:
+        tokens = _query_tokens(query)
+        if not tokens:
+            return []
+
+        if time_window is None:
+            as_of = utcnow()
+            events = [
+                event
+                for event in self.store.visible_events(to_rfc3339(as_of))
+                if covers_valid_time(event, as_of)
+            ]
+        else:
+            start_at, end_at = time_window
+            events = [
+                event
+                for event in self.store.visible_events(to_rfc3339(utcnow()))
+                if overlaps_valid_time_window(event, start_at, end_at)
+            ]
+
+        if not events:
+            return []
+
+        scored_events = [
+            scored
+            for scored in (_score_event(event, tokens) for event in events)
+            if scored.score > 0
+        ]
+        if not scored_events:
+            return []
+
+        event_entities = self.store.event_entity_ids_for_events([scored.event.id for scored in scored_events])
+        entity_scores: dict[str, float] = defaultdict(float)
+        entity_event_scores: dict[str, list[ScoredEvent]] = defaultdict(list)
+
+        for scored in scored_events:
+            for entity_id in event_entities.get(scored.event.id, []):
+                entity_scores[entity_id] += scored.score
+                entity_event_scores[entity_id].append(scored)
+
+        results: list[SearchResult] = []
+        for entity_id, total_score in entity_scores.items():
+            ranked_events = sorted(
+                entity_event_scores[entity_id],
+                key=lambda item: (-item.score, *valid_event_sort_key(item.event)),
+            )
+            matched_axes: set[str] = {"entity"}
+            if time_window is not None:
+                matched_axes.add("temporal")
+            results.append(
+                SearchResult(
+                    entity_id=entity_id,
+                    score=round(total_score, 6),
+                    matched_axes=matched_axes,
+                    supporting_event_ids=[item.event.id for item in ranked_events[:5]],
+                    time_basis="valid",
                 )
             )
 
