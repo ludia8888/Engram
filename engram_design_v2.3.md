@@ -110,10 +110,11 @@ pip install -e ".[dev]"
 
 ### 2.2 현재 구현된 최소 사용 예
 
-현재 저장소의 Phase 1 구현에서 실제로 동작하는 API는 아래 범위다.
+현재 저장소 코드에서 실제로 동작하는 API는 아래 범위다.
 
 - `turn()`
 - `append()`
+- `flush()`
 - `get()`
 - `get_known_at()`
 - `known_history()`
@@ -160,8 +161,9 @@ history = mem.known_history("user:alice")
 - `turn()`은 "메모리 엔진이 대화를 잃어버리지 않게 저장했다"는 뜻이다.
 - `ack.queued=True`면 다음 단계 처리를 위해 큐에 들어갔다는 뜻이다.
 - `ack.queued=False`면 원본 저장은 성공했지만 큐에는 못 들어간 상태다.
-- Phase 1에서는 `turn()`이 canonical 이벤트를 자동 생성하지 않는다.
+- 현재 구현에서는 `turn()`이 canonical 이벤트를 자동 생성하지 않는다.
 - 현재 구조화 메모리는 `append()`와 `get_known_at()` 중심으로 검증된다.
+- `flush("projection")`은 이미 커밋된 canonical 이벤트만 내부 projection snapshot에 반영한다.
 
 ### 2.4 로드맵 예시 API
 
@@ -681,17 +683,22 @@ def append(
 
 ### 7.4 Flush API
 
-Status: `Planned (Phase 2)`
+Status: `Implemented (Phase 2 PR1)`
 
 ```python
 def flush(
     self,
-    *,
-    level: Literal["raw", "canonical", "projection", "index"] = "canonical",
-    timeout: float | None = None,
+    level: Literal["raw", "canonical", "projection", "index"] = "projection",
 ) -> None:
     ...
 ```
+
+현재 구현 규칙:
+- `flush("raw")`는 즉시 반환한다. `turn()`이 raw append를 이미 동기 완료하기 때문이다.
+- `flush("canonical")`도 현재는 즉시 반환한다. background extractor가 아직 없어서 queue를 소비하지 않는다.
+- `flush("projection")`은 `dirty_ranges`를 읽어 projector rebuild를 완료할 때까지 수행한다.
+- `flush("index")`는 아직 `NotImplementedError`다. semantic/entity index가 구현되지 않았기 때문이다.
+- `turn()`만 호출한 raw turn은 `flush("projection")`으로도 canonical/projection에 올라가지 않는다.
 
 ### 7.5 Query API
 
