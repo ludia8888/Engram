@@ -60,6 +60,7 @@ class Engram:
         self.queue_put_timeout = queue_put_timeout
         self.extractor = extractor or NullExtractor()
         self.embedder = embedder or HashEmbedder()
+        self._bind_extractor_runtime_context()
 
         self._writer_lock = WriterLock(self.root / ".writer.lock")
         self.conn = None
@@ -474,6 +475,27 @@ class Engram:
 
     def raw_recent(self, limit: int = 20) -> list[RawTurn]:
         return self.raw_log.raw_recent(limit=limit)
+
+    def _bind_extractor_runtime_context(self) -> None:
+        bind = getattr(self.extractor, "bind_runtime_context", None)
+        if callable(bind):
+            bind(
+                safe_user_id=self.safe_user_id,
+                recent_turns_provider=self._recent_turns_for_extractor,
+            )
+
+    def _recent_turns_for_extractor(self, item: QueueItem, limit: int) -> list[RawTurn]:
+        recent = self.raw_recent(limit=max(limit + 8, limit))
+        filtered: list[RawTurn] = []
+        for turn in recent:
+            if turn.id == item.turn_id:
+                continue
+            if item.session_id is not None and turn.session_id != item.session_id:
+                continue
+            filtered.append(turn)
+            if len(filtered) == limit:
+                break
+        return list(reversed(filtered))
 
     def search(
         self,

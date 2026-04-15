@@ -660,6 +660,11 @@ class Engram:
 현재 구현 메모:
 - extractor를 넘기지 않으면 기본 `NullExtractor`가 사용된다.
 - 즉 `flush("canonical")`은 동작하지만, 기본값으로는 extraction run만 기록하고 event는 만들지 않는다.
+- 현재 런타임은 opt-in `OpenAIExtractor`도 지원한다.
+- `OpenAIExtractor`를 쓰려면 optional dependency 설치가 필요하다: `pip install "engram[openai]"`.
+- `OpenAIExtractor`의 기본 모델은 `gpt-5.4-mini`이고, version은 최소한 backend identity와 model을 함께 반영한다.
+- 첫 extractor 버전은 `Entity + Relation`만 추출하고, `caused_by`와 `effective_at_*`는 자동 생성하지 않는다.
+- 첫 extractor 버전은 애매하면 빈 결과를 반환하는 보수적 정책을 따른다.
 - embedder를 넘기지 않으면 기본 `HashEmbedder`가 사용된다.
 - embedder는 `version`, `dim`, `embed_texts(texts)`를 가진 pluggable 인터페이스다.
 - 현재 런타임은 `HashEmbedder` 외에 opt-in `OpenAIEmbedder`도 지원한다.
@@ -1014,6 +1019,14 @@ class QueueItem:
 1. 지금 말한 사실을 구조화한다.
 2. 실제 적용 시간에 대해 자신 있는 수준만 표시한다.
 
+현재 구현 메모:
+- 기본 extractor는 여전히 `NullExtractor`다.
+- opt-in `OpenAIExtractor`가 첫 실제 LLM 추출기 구현으로 들어와 있다.
+- 첫 버전 `OpenAIExtractor`는 `entity.*`와 `relation.*`만 생성한다.
+- 첫 버전은 `caused_by`를 생성하지 않는다.
+- 첫 버전은 `effective_at_start/end`를 생성하지 않는다. 따라서 저장 시 둘 다 `None`, `time_confidence="unknown"`으로 고정된다.
+- 첫 버전은 "조금이라도 남긴다"보다 "틀린 기억을 쓰지 않는다"를 우선한다. 즉 애매하면 `{"events": []}`를 반환하는 것이 정상 동작이다.
+
 ```python
 {
   "events": [
@@ -1021,10 +1034,7 @@ class QueueItem:
       "type": "entity.update",
       "data": {"id": "user:alice", "attrs": {"location": "Busan"}},
       "confidence": 0.92,
-      "reason": "사용자가 본인의 현재 거주지를 명시함",
-      "effective_at_start": "2026-04-29T00:00:00Z",
-      "effective_at_end": null,
-      "time_confidence": "inferred"
+      "reason": "사용자가 본인의 현재 거주지를 명시함"
     }
   ]
 }
@@ -1032,9 +1042,11 @@ class QueueItem:
 
 중요한 규칙:
 - `observed_at`는 무조건 `RawTurn.observed_at`
-- `effective_at_*`는 추출기가 진짜로 추정할 수 있을 때만 채운다
-- 모르면 비워 둔다
-- assistant 발화는 기본적으로 낮은 신뢰 소스로 취급한다
+- 첫 버전 `OpenAIExtractor`는 `effective_at_*`를 추출하지 않는다
+- 첫 버전 `OpenAIExtractor`는 `source_role="user"`로 고정한다
+- 현재 user 자신은 `user:<safe_user_id>`로 정규화한다
+- 다른 사람은 기본적으로 `person:<slug>`, 비인물은 `entity:<slug>` 계열을 사용한다
+- assistant 발화는 보조 문맥으로만 쓰고, 직접 사실 추출은 user 발화 중심으로 수행한다
 
 ### 9.4 Canonical Commit 계약
 

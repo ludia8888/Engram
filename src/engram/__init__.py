@@ -1,6 +1,7 @@
 from .canonical import Extractor, NullExtractor
 from .engram import Engram
 from .errors import EngramError, QueueFullError, ValidationError, WriterLockError
+from .openai_extractor import OpenAIExtractor
 from .semantic import Embedder, HashEmbedder, OpenAIEmbedder
 from .types import (
     Entity,
@@ -21,6 +22,7 @@ from .types import (
 __all__ = [
     "Extractor",
     "NullExtractor",
+    "OpenAIExtractor",
     "Embedder",
     "HashEmbedder",
     "OpenAIEmbedder",
