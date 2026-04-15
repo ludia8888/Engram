@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from engram import Engram
 import engram.engram as engram_module
+import engram.retrieval as retrieval_module
 
 from tests.conftest import dt
 
@@ -211,6 +212,36 @@ def test_search_valid_skips_unknown_effective_time_events(tmp_path):
     results = mem.search("Busan", time_mode="valid")
 
     assert results == []
+
+    mem.close()
+
+
+def test_search_valid_without_time_window_uses_current_as_of(tmp_path, monkeypatch):
+    mem = Engram(user_id="alice", path=str(tmp_path))
+    mem.append(
+        "entity.create",
+        {"id": "user:alice", "type": "user", "attrs": {"location": "Seoul"}},
+        observed_at=dt("2026-05-01T10:00:00Z"),
+        effective_at_start=dt("2026-05-01T00:00:00Z"),
+        time_confidence="exact",
+    )
+    moved_event_id = mem.append(
+        "entity.update",
+        {"id": "user:alice", "attrs": {"location": "Busan"}},
+        observed_at=dt("2026-05-10T10:00:00Z"),
+        effective_at_start=dt("2026-05-08T00:00:00Z"),
+        time_confidence="exact",
+        reason="moved to Busan",
+    )
+
+    monkeypatch.setattr(retrieval_module, "utcnow", lambda: dt("2026-05-09T12:00:00Z"))
+
+    results = mem.search("Busan", time_mode="valid")
+
+    assert results
+    assert results[0].entity_id == "user:alice"
+    assert results[0].time_basis == "valid"
+    assert moved_event_id in results[0].supporting_event_ids
 
     mem.close()
 
