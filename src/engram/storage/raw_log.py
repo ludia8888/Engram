@@ -62,6 +62,9 @@ class SegmentedRawLog:
         turns = list(self._iter_turns())
         return list(reversed(turns[-limit:]))
 
+    def raw_all(self) -> list[RawTurn]:
+        return list(self._iter_turns())
+
     def _iter_turns(self):
         manifest = self._load_manifest()
         active = self.root / manifest["active_segment"]
@@ -96,4 +99,3 @@ class SegmentedRawLog:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temp_path, self.manifest_path)
-

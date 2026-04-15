@@ -1,0 +1,45 @@
+from __future__ import annotations
+
+import queue
+
+from .errors import QueueFullError
+from .projector import Projector
+from .storage.raw_log import SegmentedRawLog
+from .storage.store import EventStore
+from .types import QueueItem
+
+
+class RecoveryService:
+    def __init__(
+        self,
+        raw_log: SegmentedRawLog,
+        store: EventStore,
+        projector: Projector,
+        work_queue: queue.Queue[QueueItem],
+        queue_put_timeout: float,
+    ):
+        self.raw_log = raw_log
+        self.store = store
+        self.projector = projector
+        self.work_queue = work_queue
+        self.queue_put_timeout = queue_put_timeout
+
+    def catch_up_on_startup(self) -> int:
+        while self.store.count_dirty_ranges() > 0:
+            rebuilt = self.projector.rebuild_dirty()
+            if rebuilt == 0 and self.store.count_dirty_ranges() > 0:
+                raise RuntimeError("startup projection recovery made no progress")
+
+        processed_turn_ids = self.store.source_turn_ids()
+        enqueued = 0
+        for turn in self.raw_log.raw_all():
+            if turn.id in processed_turn_ids:
+                continue
+            try:
+                self.work_queue.put(QueueItem.from_turn(turn), timeout=self.queue_put_timeout)
+            except queue.Full as exc:
+                raise QueueFullError(
+                    f"startup catch-up could not enqueue raw turn {turn.id}"
+                ) from exc
+            enqueued += 1
+        return enqueued

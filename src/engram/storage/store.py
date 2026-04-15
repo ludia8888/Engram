@@ -160,6 +160,16 @@ class EventStore:
         ).fetchall()
         return [str(row[0]) for row in rows]
 
+    def source_turn_ids(self) -> set[str]:
+        rows = self.conn.execute(
+            """
+            SELECT DISTINCT source_turn_id
+            FROM events
+            WHERE source_turn_id IS NOT NULL
+            """
+        ).fetchall()
+        return {str(row[0]) for row in rows}
+
     def entity_events_visible_at(self, entity_id: str, recorded_at: str) -> list[Event]:
         rows = self.conn.execute(
             """

@@ -8,6 +8,7 @@ from uuid import uuid4
 
 from .errors import ValidationError
 from .projector import Projector
+from .recovery import RecoveryService
 from .storage import EventStore, SegmentedRawLog, WriterLock, open_connection
 from .storage.store import DirtyRangeRow
 from .time_utils import ensure_utc, to_rfc3339, utcnow
@@ -38,17 +39,34 @@ class Engram:
         self.queue_put_timeout = queue_put_timeout
 
         self._writer_lock = WriterLock(self.root / ".writer.lock")
+        self.conn = None
         self._writer_lock.acquire()
-
-        self.conn = open_connection(self.db_path)
-        self.store = EventStore(self.conn)
-        self.raw_log = SegmentedRawLog(self.root / "raw")
-        self.projector = Projector(self.store)
-        self.queue: queue.Queue[QueueItem] = queue.Queue(maxsize=queue_max_size)
+        try:
+            self.conn = open_connection(self.db_path)
+            self.store = EventStore(self.conn)
+            self.raw_log = SegmentedRawLog(self.root / "raw")
+            self.projector = Projector(self.store)
+            self.queue: queue.Queue[QueueItem] = queue.Queue(maxsize=queue_max_size)
+            self.recovery = RecoveryService(
+                raw_log=self.raw_log,
+                store=self.store,
+                projector=self.projector,
+                work_queue=self.queue,
+                queue_put_timeout=self.queue_put_timeout,
+            )
+            self.recovery.catch_up_on_startup()
+        except BaseException:
+            if self.conn is not None:
+                self.conn.close()
+                self.conn = None
+            self._writer_lock.release()
+            raise
 
     def close(self) -> None:
         try:
-            self.conn.close()
+            if self.conn is not None:
+                self.conn.close()
+                self.conn = None
         finally:
             self._writer_lock.release()
 
@@ -75,12 +93,7 @@ class Engram:
         try:
             self.queue.put(item, timeout=self.queue_put_timeout)
         except queue.Full:
-            return TurnAck(
-                turn_id=ack.turn_id,
-                observed_at=ack.observed_at,
-                durable_at=ack.durable_at,
-                queued=False,
-            )
+            return TurnAck(turn_id=ack.turn_id, observed_at=ack.observed_at, durable_at=ack.durable_at, queued=False)
         return ack
 
     def append(
