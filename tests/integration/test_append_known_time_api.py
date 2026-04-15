@@ -2,10 +2,9 @@ from __future__ import annotations
 
 import importlib
 
-import pytest
-
-from engram import Engram, ValidationError
+from engram import Engram
 from engram.time_utils import utcnow
+from engram.time_utils import to_rfc3339
 
 from tests.conftest import dt
 
@@ -102,18 +101,41 @@ def test_get_uses_one_consistent_now_snapshot(tmp_path, monkeypatch):
     mem.close()
 
 
-def test_relation_events_are_rejected_in_phase_1_runtime(tmp_path):
+def test_relation_events_are_allowed_and_visible_on_source_and_target(tmp_path):
     mem = Engram(user_id="alice", path=str(tmp_path))
 
-    with pytest.raises(ValidationError, match="planned but not implemented in Phase 1"):
-        mem.append(
-            "relation.create",
-            {
-                "source": "user:alice",
-                "target": "project:engram",
-                "type": "owns",
-                "attrs": {},
-            },
-        )
+    created_id = mem.append(
+        "relation.create",
+        {
+            "source": "user:alice",
+            "target": "project:engram",
+            "type": "owns",
+            "attrs": {"role": "creator"},
+        },
+    )
+    updated_id = mem.append(
+        "relation.update",
+        {
+            "source": "user:alice",
+            "target": "project:engram",
+            "type": "owns",
+            "attrs": {"scope": "core"},
+        },
+    )
+    deleted_id = mem.append(
+        "relation.delete",
+        {
+            "source": "user:alice",
+            "target": "project:engram",
+            "type": "owns",
+        },
+    )
+
+    future = to_rfc3339(dt("2030-01-01T00:00:00Z"))
+    source_events = mem.store.entity_events_known_visible_at("user:alice", future)
+    target_events = mem.store.entity_events_known_visible_at("project:engram", future)
+
+    assert {event.id for event in source_events} >= {created_id, updated_id, deleted_id}
+    assert {event.id for event in target_events} >= {created_id, updated_id, deleted_id}
 
     mem.close()

@@ -8,6 +8,7 @@ from typing import Any, Literal
 SourceRole = Literal["user", "assistant", "tool", "system", "manual"]
 TimeConfidence = Literal["exact", "inferred", "unknown"]
 ExtractionRunStatus = Literal["SUCCEEDED", "FAILED", "SKIPPED"]
+RelationDirection = Literal["outgoing", "incoming"]
 
 
 @dataclass(slots=True)
@@ -138,3 +139,11 @@ class HistoryEntry:
     confidence: float | None
     basis: Literal["known", "valid"]
     event_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class RelationEdge:
+    relation_type: str
+    other_entity_id: str
+    direction: RelationDirection
+    attrs: dict[str, Any]

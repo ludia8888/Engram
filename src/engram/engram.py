@@ -9,7 +9,7 @@ from uuid import uuid4
 from .canonical import CanonicalWorker, Extractor, NullExtractor
 from .context_builder import ContextBuilder
 from .errors import ValidationError
-from .event_ops import derive_dirty_rows, derive_event_entities, validate_event
+from .event_ops import derive_cascade_dirty_rows_for_entity_event, derive_dirty_rows, derive_event_entities, validate_event
 from .projector import Projector
 from .recovery import RecoveryService
 from .retrieval import RetrievalEngine
@@ -18,7 +18,7 @@ from .semantic_index import SemanticIndexer
 from .storage import EventStore, SegmentedRawLog, WriterLock, open_connection
 from .storage.store import valid_event_sort_key
 from .time_utils import ensure_utc, to_rfc3339, utcnow
-from .types import Entity, Event, HistoryEntry, QueueItem, RawTurn, SearchResult, TemporalEntityView, TurnAck
+from .types import Entity, Event, HistoryEntry, QueueItem, RawTurn, RelationEdge, SearchResult, TemporalEntityView, TurnAck
 
 
 def _safe_user_id(user_id: str) -> str:
@@ -152,6 +152,12 @@ class Engram:
             )
             event_entities = derive_event_entities(event)
             dirty_rows = derive_dirty_rows(event, event_entities)
+            dirty_rows.extend(
+                derive_cascade_dirty_rows_for_entity_event(
+                    event,
+                    self.store.related_owner_ids_for_entity(event.data["id"]) if event.type.startswith("entity.") else [],
+                )
+            )
             self.store.append_event(tx, event)
             self.store.append_event_entities(tx, event.id, event_entities)
             self.store.mark_dirty(tx, dirty_rows)
@@ -336,16 +342,20 @@ class Engram:
                 include_history=include_history,
                 include_raw=include_raw,
                 get_known_at=self.get_known_at,
+                get_known_relations_at=self._get_known_relations_at,
             )
         if time_mode == "valid":
             return self.context_builder.build_valid(
                 query=query,
                 results=results,
                 as_of=as_of,
+                time_window=time_window,
                 max_tokens=max_tokens,
                 include_history=include_history,
                 include_raw=include_raw,
                 get_valid_at=self.get_valid_at,
+                get_valid_relations_at=self._get_valid_relations_at,
+                get_valid_relations_in_window=self._get_valid_relations_in_window,
             )
         raise ValidationError(f"unsupported time_mode: {time_mode}")
 
@@ -375,3 +385,23 @@ class Engram:
             self.semantic_indexer.index_missing()
             return
         raise ValidationError(f"unsupported flush level: {level}")
+
+    def _get_known_relations_at(self, entity_id: str, at) -> list[RelationEdge]:
+        target = ensure_utc(at, "at")
+        return self.store.relation_edges_known_at(entity_id, to_rfc3339(target))
+
+    def _get_valid_relations_at(self, entity_id: str, at) -> list[RelationEdge]:
+        target = ensure_utc(at, "at")
+        return self.store.relation_edges_valid_at(entity_id, target)
+
+    def _get_valid_relations_in_window(
+        self,
+        entity_id: str,
+        start_at,
+        end_at,
+    ) -> list[RelationEdge]:
+        start = ensure_utc(start_at, "start_at")
+        end = ensure_utc(end_at, "end_at")
+        if start >= end:
+            return []
+        return self.store.relation_edges_valid_in_window(entity_id, start, end)

@@ -187,22 +187,33 @@ class RetrievalEngine:
     def _known_visible_events(self, time_window: tuple[datetime, datetime] | None) -> list[Event]:
         upper_bound = time_window[1] if time_window else utcnow()
         lower_bound = time_window[0] if time_window else None
-        return self.store.visible_events_known(
+        events = self.store.visible_events_known(
             to_rfc3339(upper_bound),
             from_recorded_at=to_rfc3339(lower_bound) if lower_bound else None,
         )
+        recorded_at = to_rfc3339(upper_bound)
+        return [
+            event
+            for event in events
+            if self.store.relation_event_is_live_known(event, recorded_at)
+        ]
 
     def _valid_visible_events(self, time_window: tuple[datetime, datetime] | None) -> list[Event]:
         visible_events = self.store.visible_events_valid()
         if time_window is None:
             as_of = utcnow()
-            return [event for event in visible_events if covers_valid_time(event, as_of)]
+            return [
+                event
+                for event in visible_events
+                if covers_valid_time(event, as_of) and self.store.relation_event_is_live_valid(event, as_of)
+            ]
 
         start_at, end_at = time_window
         return [
             event
             for event in visible_events
             if overlaps_valid_time_window(event, start_at, end_at)
+            and self.store.relation_event_is_live_valid_in_window(event, start_at, end_at)
         ]
 
     def _semantic_scores(self, query: str, events: list[Event]) -> dict[str, float]:

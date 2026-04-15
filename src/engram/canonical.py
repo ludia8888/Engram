@@ -4,7 +4,12 @@ from dataclasses import dataclass
 from typing import Protocol
 from uuid import uuid4
 
-from .event_ops import derive_dirty_rows, derive_event_entities, validate_event
+from .event_ops import (
+    derive_cascade_dirty_rows_for_entity_event,
+    derive_dirty_rows,
+    derive_event_entities,
+    validate_event,
+)
 from .storage.store import DirtyRangeRow, EventStore
 from .time_utils import to_rfc3339, utcnow
 from .types import Event, ExtractedEvent, ExtractionRun, QueueItem
@@ -95,6 +100,14 @@ class CanonicalWorker:
                     self.store.append_event(tx, event)
                     self.store.append_event_entities(tx, event.id, event_entities)
                     dirty_rows.extend(derive_dirty_rows(event, event_entities))
+                    dirty_rows.extend(
+                        derive_cascade_dirty_rows_for_entity_event(
+                            event,
+                            self.store.related_owner_ids_for_entity(event.data["id"])
+                            if event.type.startswith("entity.")
+                            else [],
+                        )
+                    )
 
                 if superseded_run_ids:
                     dirty_rows.extend(

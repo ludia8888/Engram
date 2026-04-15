@@ -25,9 +25,19 @@ def validate_event(event_type: str, data: dict) -> None:
             raise ValidationError("entity.delete requires string id")
         return
     if event_type in {"relation.create", "relation.update"}:
-        raise ValidationError(f"{event_type} is planned but not implemented in Phase 1")
+        if not isinstance(data.get("source"), str) or not isinstance(data.get("target"), str):
+            raise ValidationError(f"{event_type} requires string source and target")
+        if not isinstance(data.get("type"), str):
+            raise ValidationError(f"{event_type} requires string type")
+        if not isinstance(data.get("attrs"), dict):
+            raise ValidationError(f"{event_type} requires attrs dict")
+        return
     if event_type == "relation.delete":
-        raise ValidationError("relation.delete is planned but not implemented in Phase 1")
+        if not isinstance(data.get("source"), str) or not isinstance(data.get("target"), str):
+            raise ValidationError("relation.delete requires string source and target")
+        if not isinstance(data.get("type"), str):
+            raise ValidationError("relation.delete requires string type")
+        return
     raise ValidationError(f"unsupported event type: {event_type}")
 
 
@@ -60,3 +70,25 @@ def derive_dirty_rows(
             )
         )
     return rows
+
+
+def derive_cascade_dirty_rows_for_entity_event(
+    event: Event,
+    owner_ids: list[str],
+) -> list[tuple[str, str, str, str | None, str, str]]:
+    if event.type not in {"entity.create", "entity.delete"} or not owner_ids:
+        return []
+    created_at = to_rfc3339(utcnow())
+    from_recorded_at = to_rfc3339(event.recorded_at)
+    from_effective_at = to_rfc3339(event.effective_at_start) if event.effective_at_start else None
+    return [
+        (
+            str(uuid4()),
+            owner_id,
+            from_recorded_at,
+            from_effective_at,
+            f"cascade:{event.type}:{event.id}",
+            created_at,
+        )
+        for owner_id in owner_ids
+    ]
