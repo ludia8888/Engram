@@ -213,7 +213,7 @@ class RetrievalEngine:
             event
             for event in visible_events
             if overlaps_valid_time_window(event, start_at, end_at)
-            and self.store.relation_event_is_live_valid(event, end_at)
+            and self.store.relation_event_is_live_valid_in_window(event, start_at, end_at)
         ]
 
     def _semantic_scores(self, query: str, events: list[Event]) -> dict[str, float]:

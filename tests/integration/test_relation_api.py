@@ -220,7 +220,7 @@ def test_context_valid_only_shows_relations_active_in_requested_window(tmp_path)
     before = mem.context(
         "manager",
         time_mode="valid",
-        time_window=(dt("2026-05-02T00:00:00Z"), dt("2026-05-03T00:00:00Z")),
+        time_window=(dt("2026-05-02T00:00:00Z"), dt("2026-05-12T00:00:00Z")),
         max_tokens=800,
     )
     after = mem.context(
@@ -230,8 +230,101 @@ def test_context_valid_only_shows_relations_active_in_requested_window(tmp_path)
         max_tokens=800,
     )
 
+    assert "relations_active_in_window" in before
     assert "manager -> user:bob" in before
     assert "manager -> user:bob" not in after
+
+    mem.close()
+
+
+def test_valid_window_shows_relation_active_only_in_middle_of_window(tmp_path):
+    mem = Engram(user_id="alice", path=str(tmp_path))
+    _append_people(mem)
+    mem.append(
+        "relation.create",
+        {
+            "source": "user:alice",
+            "target": "user:bob",
+            "type": "mentor",
+            "attrs": {"cadence": "weekly"},
+        },
+        observed_at=dt("2026-05-05T10:00:00Z"),
+        effective_at_start=dt("2026-05-05T00:00:00Z"),
+        source_role="manual",
+        time_confidence="exact",
+    )
+    mem.append(
+        "relation.delete",
+        {
+            "source": "user:alice",
+            "target": "user:bob",
+            "type": "mentor",
+        },
+        observed_at=dt("2026-05-06T10:00:00Z"),
+        effective_at_start=dt("2026-05-06T00:00:00Z"),
+        source_role="manual",
+        time_confidence="exact",
+    )
+
+    results = mem.search(
+        "mentor weekly",
+        time_mode="valid",
+        time_window=(dt("2026-05-01T00:00:00Z"), dt("2026-05-10T00:00:00Z")),
+        k=5,
+    )
+    text = mem.context(
+        "mentor",
+        time_mode="valid",
+        time_window=(dt("2026-05-01T00:00:00Z"), dt("2026-05-10T00:00:00Z")),
+        max_tokens=800,
+    )
+
+    assert results
+    assert {result.entity_id for result in results[:2]} == {"user:alice", "user:bob"}
+    assert "mentor -> user:bob" in text
+    assert "relations_active_in_window" in text
+
+    mem.close()
+
+
+def test_valid_point_query_remains_point_in_time_for_relations(tmp_path, monkeypatch):
+    mem = Engram(user_id="alice", path=str(tmp_path))
+    _append_people(mem)
+    mem.append(
+        "relation.create",
+        {
+            "source": "user:alice",
+            "target": "user:bob",
+            "type": "manager",
+            "attrs": {"scope": "engram"},
+        },
+        observed_at=dt("2026-05-01T10:00:00Z"),
+        effective_at_start=dt("2026-05-01T00:00:00Z"),
+        source_role="manual",
+        time_confidence="exact",
+    )
+    mem.append(
+        "relation.delete",
+        {
+            "source": "user:alice",
+            "target": "user:bob",
+            "type": "manager",
+        },
+        observed_at=dt("2026-05-10T10:00:00Z"),
+        effective_at_start=dt("2026-05-10T00:00:00Z"),
+        source_role="manual",
+        time_confidence="exact",
+    )
+
+    monkeypatch.setattr("engram.retrieval.utcnow", lambda: dt("2026-05-03T00:00:00Z"))
+    monkeypatch.setattr("engram.engram.utcnow", lambda: dt("2026-05-03T00:00:00Z"))
+    assert mem.search("manager", time_mode="valid", k=5)
+    assert "manager -> user:bob" in mem.context("manager", time_mode="valid", max_tokens=600)
+
+    monkeypatch.setattr("engram.retrieval.utcnow", lambda: dt("2026-05-11T00:00:00Z"))
+    monkeypatch.setattr("engram.engram.utcnow", lambda: dt("2026-05-11T00:00:00Z"))
+    assert mem.search("manager", time_mode="valid", k=5) == []
+    assert "manager -> user:bob" not in mem.context("manager", time_mode="valid", max_tokens=600)
 
     mem.close()
 
@@ -302,6 +395,109 @@ def test_relation_update_without_prior_create_is_treated_as_active_relation(tmp_
     assert "mentor -> user:bob" in text
     assert "cadence': 'weekly'" in text
     assert mem.projector.current_relation_snapshot()["user:alice"][0].relation_type == "mentor"
+
+    mem.close()
+
+
+def test_relation_update_without_prior_create_is_visible_in_valid_point_and_window(tmp_path, monkeypatch):
+    mem = Engram(user_id="alice", path=str(tmp_path))
+    _append_people(mem)
+    mem.append(
+        "relation.update",
+        {
+            "source": "user:alice",
+            "target": "user:bob",
+            "type": "teammate",
+            "attrs": {"project": "engram"},
+        },
+        observed_at=dt("2026-05-05T10:00:00Z"),
+        effective_at_start=dt("2026-05-05T00:00:00Z"),
+        source_role="manual",
+        reason="relation update is treated as upsert",
+        time_confidence="exact",
+    )
+
+    window_results = mem.search(
+        "teammate engram",
+        time_mode="valid",
+        time_window=(dt("2026-05-01T00:00:00Z"), dt("2026-05-10T00:00:00Z")),
+        k=5,
+    )
+    window_context = mem.context(
+        "teammate",
+        time_mode="valid",
+        time_window=(dt("2026-05-01T00:00:00Z"), dt("2026-05-10T00:00:00Z")),
+        max_tokens=800,
+    )
+
+    monkeypatch.setattr("engram.retrieval.utcnow", lambda: dt("2026-05-06T00:00:00Z"))
+    monkeypatch.setattr("engram.engram.utcnow", lambda: dt("2026-05-06T00:00:00Z"))
+    point_results = mem.search("teammate engram", time_mode="valid", k=5)
+    point_context = mem.context("teammate", time_mode="valid", max_tokens=800)
+
+    assert window_results
+    assert point_results
+    assert "teammate -> user:bob" in window_context
+    assert "relations_active_in_window" in window_context
+    assert "teammate -> user:bob" in point_context
+
+    mem.close()
+
+
+def test_valid_window_only_shows_relation_when_endpoint_overlaps_window(tmp_path):
+    mem = Engram(user_id="alice", path=str(tmp_path))
+    _append_people(mem)
+    mem.append(
+        "relation.create",
+        {
+            "source": "user:alice",
+            "target": "user:bob",
+            "type": "manager",
+            "attrs": {"scope": "engram"},
+        },
+        observed_at=dt("2026-05-01T10:00:00Z"),
+        effective_at_start=dt("2026-05-01T00:00:00Z"),
+        source_role="manual",
+        time_confidence="exact",
+    )
+    mem.append(
+        "entity.delete",
+        {"id": "user:bob"},
+        observed_at=dt("2026-05-05T10:00:00Z"),
+        effective_at_start=dt("2026-05-05T00:00:00Z"),
+        source_role="manual",
+        time_confidence="exact",
+    )
+
+    visible_results = mem.search(
+        "manager",
+        time_mode="valid",
+        time_window=(dt("2026-05-02T00:00:00Z"), dt("2026-05-10T00:00:00Z")),
+        k=5,
+    )
+    visible_context = mem.context(
+        "manager",
+        time_mode="valid",
+        time_window=(dt("2026-05-02T00:00:00Z"), dt("2026-05-10T00:00:00Z")),
+        max_tokens=800,
+    )
+    hidden_results = mem.search(
+        "manager",
+        time_mode="valid",
+        time_window=(dt("2026-05-06T00:00:00Z"), dt("2026-05-10T00:00:00Z")),
+        k=5,
+    )
+    hidden_context = mem.context(
+        "manager",
+        time_mode="valid",
+        time_window=(dt("2026-05-06T00:00:00Z"), dt("2026-05-10T00:00:00Z")),
+        max_tokens=800,
+    )
+
+    assert visible_results
+    assert "manager -> user:bob" in visible_context
+    assert hidden_results == []
+    assert "manager -> user:bob" not in hidden_context
 
     mem.close()
 

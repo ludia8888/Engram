@@ -19,6 +19,7 @@ class ContextBuilder:
         query: str,
         results: list[SearchResult],
         as_of: datetime | None,
+        time_window: tuple[datetime, datetime] | None = None,
         max_tokens: int,
         include_history: bool,
         include_raw: bool,
@@ -30,6 +31,7 @@ class ContextBuilder:
             query=query,
             results=results,
             as_of=as_of,
+            time_window=time_window,
             max_tokens=max_tokens,
             include_history=include_history,
             include_raw=include_raw,
@@ -43,22 +45,26 @@ class ContextBuilder:
         query: str,
         results: list[SearchResult],
         as_of: datetime | None,
+        time_window: tuple[datetime, datetime] | None,
         max_tokens: int,
         include_history: bool,
         include_raw: bool,
         get_valid_at,
         get_valid_relations_at,
+        get_valid_relations_in_window,
     ) -> str:
         return self._build(
             mode="valid",
             query=query,
             results=results,
             as_of=as_of,
+            time_window=time_window,
             max_tokens=max_tokens,
             include_history=include_history,
             include_raw=include_raw,
             get_view=get_valid_at,
             get_relations=get_valid_relations_at,
+            get_relations_in_window=get_valid_relations_in_window,
         )
 
     def _build(
@@ -68,11 +74,13 @@ class ContextBuilder:
         query: str,
         results: list[SearchResult],
         as_of: datetime | None,
+        time_window: tuple[datetime, datetime] | None,
         max_tokens: int,
         include_history: bool,
         include_raw: bool,
         get_view,
         get_relations,
+        get_relations_in_window=None,
     ) -> str:
         basis_time = as_of or utcnow()
         supporting_events = self.store.events_by_ids(_supporting_event_ids(results))
@@ -84,11 +92,26 @@ class ContextBuilder:
                 f"- query: {query}",
             ]
         ]
+        if time_window is not None:
+            sections[0].append(
+                f"- time_window: {to_rfc3339(time_window[0])}..{to_rfc3339(time_window[1])}"
+            )
 
         current_state = ["## Current State"]
         for result in results:
             view: TemporalEntityView | None = get_view(result.entity_id, basis_time)
-            relations: list[RelationEdge] = list(get_relations(result.entity_id, basis_time))
+            relation_summary_label = "relations"
+            if time_window is not None and get_relations_in_window is not None:
+                relations: list[RelationEdge] = list(
+                    get_relations_in_window(
+                        result.entity_id,
+                        time_window[0],
+                        time_window[1],
+                    )
+                )
+                relation_summary_label = "relations_active_in_window"
+            else:
+                relations = list(get_relations(result.entity_id, basis_time))
             if view is None and not relations:
                 continue
             entity_id = result.entity_id if view is None else view.entity_id
@@ -98,7 +121,7 @@ class ContextBuilder:
             if view is not None and view.unknown_attrs:
                 line += f" unknown_attrs={view.unknown_attrs}"
             if relations:
-                line += f" relations={_relation_summaries(relations)}"
+                line += f" {relation_summary_label}={_relation_summaries(relations)}"
             current_state.append(line)
         if len(current_state) > 1:
             sections.append(current_state)

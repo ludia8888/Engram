@@ -696,6 +696,7 @@ def append(
 - 현재 런타임에서 `append()`가 허용하는 structured 이벤트는 `entity.create`, `entity.update`, `entity.delete`, `relation.create`, `relation.update`, `relation.delete`다.
 - relation 전용 public read API는 아직 없지만, relation 이벤트는 canonical replay, `search()`, `context()`, projector rebuild에 반영된다.
 - `relation.update`는 prior `relation.create`가 없어도 active relation을 만든 것으로 해석한다.
+- `valid` + `time_window=(start, end)`에서 relation은 `end` 시점 active가 아니라 `[start, end)` 구간 중 한 번이라도 active였으면 후보로 포함된다.
 
 ### 7.4 Flush API
 
@@ -792,6 +793,7 @@ def context(
 - `context()`는 `search()` 결과를 바탕으로 `Memory Basis / Current State / Relevant Changes / Raw Evidence` 섹션을 만든다.
 - relation event가 supporting event에 포함되면 source/target entity를 현재 상태 후보로 투영하고, active relation summary를 `Current State`에 함께 적는다.
 - relation event는 query의 mode/time 기준에서 양 endpoint entity가 모두 active일 때만 active relation seed로 취급한다.
+- `context(time_mode="valid", time_window=...)`의 relation summary는 `relations_active_in_window=...` 형식으로 표기하고, 구간 중 활성이라는 의미를 드러낸다.
 - `include_raw=True`일 때만 `source_turn_id`를 따라 raw evidence를 붙인다.
 - `context(time_mode="valid")`는 `Current State`에 `unknown_attrs`를 함께 노출한다.
 - `Relevant Changes`는 entity attr 변경뿐 아니라 relation create/update/delete도 문장으로 렌더링한다.
@@ -1020,6 +1022,7 @@ query
 - 결과는 entity별 supporting event 집합으로 반환한다.
 - `known` mode의 `time_window`는 `recorded_at` 기준으로만 적용된다.
 - `valid` mode의 `time_window`는 `effective_at_*` overlap 기준으로 적용된다.
+- relation event는 `valid` point query에서는 해당 시점에 active일 때만 seed가 되고, `valid` window query에서는 구간 중 한 번이라도 active였으면 seed가 된다.
 - `valid` mode는 `effective_at_start`가 없는 이벤트를 검색 seed에서 제외하고, 불확실성은 `context()`의 `unknown_attrs`에서 보완한다.
 - semantic row가 없는 이벤트는 lexical-only 후보로 남는다.
 

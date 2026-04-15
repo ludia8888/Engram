@@ -349,11 +349,13 @@ class Engram:
                 query=query,
                 results=results,
                 as_of=as_of,
+                time_window=time_window,
                 max_tokens=max_tokens,
                 include_history=include_history,
                 include_raw=include_raw,
                 get_valid_at=self.get_valid_at,
                 get_valid_relations_at=self._get_valid_relations_at,
+                get_valid_relations_in_window=self._get_valid_relations_in_window,
             )
         raise ValidationError(f"unsupported time_mode: {time_mode}")
 
@@ -391,3 +393,15 @@ class Engram:
     def _get_valid_relations_at(self, entity_id: str, at) -> list[RelationEdge]:
         target = ensure_utc(at, "at")
         return self.store.relation_edges_valid_at(entity_id, target)
+
+    def _get_valid_relations_in_window(
+        self,
+        entity_id: str,
+        start_at,
+        end_at,
+    ) -> list[RelationEdge]:
+        start = ensure_utc(start_at, "start_at")
+        end = ensure_utc(end_at, "end_at")
+        if start >= end:
+            return []
+        return self.store.relation_edges_valid_in_window(entity_id, start, end)
