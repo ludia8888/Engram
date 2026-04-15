@@ -479,3 +479,54 @@ def test_extractor_auto_wires_causal_link_from_entity_to_relation(tmp_path, monk
     assert "causal" in causal_axes
 
     mem.close()
+
+
+def test_causal_auto_wire_works_when_cause_entity_is_first_in_batch(tmp_path, monkeypatch):
+    _install_fake_openai(
+        monkeypatch,
+        [
+            {
+                "events": [
+                    {
+                        "type": "entity.create",
+                        "data": {"id": "person:bob", "type": "person", "attrs": {"name": "Bob"}},
+                        "confidence": 0.9,
+                        "reason": "Bob 명시",
+                    },
+                    {
+                        "type": "relation.create",
+                        "data": {
+                            "source": "self",
+                            "target": "person:bob",
+                            "type": "friend",
+                            "attrs": {},
+                        },
+                        "confidence": 0.85,
+                        "reason": "Bob과 친구라고 명시",
+                    },
+                ]
+            }
+        ],
+    )
+    mem = Engram(
+        user_id="alice",
+        path=str(tmp_path),
+        extractor=OpenAIExtractor(api_key="test-key"),
+    )
+    mem.turn(
+        user="Bob is my friend",
+        assistant="Got it.",
+        observed_at=dt("2026-05-01T10:00:00Z"),
+    )
+    mem.flush("all")
+
+    events = mem.store.events_by_ids(
+        [event.id for event in mem.store.visible_events_valid()]
+    )
+    relation_events = [e for e in events if e.type == "relation.create"]
+    bob_create = next(e for e in events if e.type == "entity.create" and e.data["id"] == "person:bob")
+
+    assert len(relation_events) == 1
+    assert relation_events[0].caused_by == bob_create.id
+
+    mem.close()

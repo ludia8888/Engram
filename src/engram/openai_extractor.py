@@ -386,7 +386,9 @@ def _auto_wire_causal(event: ExtractedEvent, entity_create_indexes: dict[str, in
         return
     target_id = event.data.get("target")
     source_id = event.data.get("source")
-    cause_index = entity_create_indexes.get(target_id) or entity_create_indexes.get(source_id)
+    cause_index = entity_create_indexes.get(target_id)
+    if cause_index is None:
+        cause_index = entity_create_indexes.get(source_id)
     if cause_index is not None:
         event.caused_by = f"{_BATCH_REF_PREFIX}{cause_index}"
 
