@@ -19,6 +19,7 @@ from .storage import EventStore, SegmentedRawLog, WriterLock, open_connection
 from .storage.store import valid_event_sort_key
 from .time_utils import ensure_utc, to_rfc3339, utcnow
 from .types import Entity, Event, HistoryEntry, QueueItem, RawTurn, RelationEdge, SearchResult, TemporalEntityView, TurnAck
+from .types import RelationHistoryEntry
 
 
 def _safe_user_id(user_id: str) -> str:
@@ -233,6 +234,64 @@ class Engram:
             skip_unknown_effective=True,
         )
 
+    def get_relations(
+        self,
+        entity_id: str,
+        *,
+        time_mode: Literal["known", "valid"] = "known",
+        at: datetime | None = None,
+        time_window: tuple[datetime, datetime] | None = None,
+    ) -> list[RelationEdge]:
+        if time_mode == "known":
+            if time_window is not None:
+                raise ValidationError("time_window is not supported for known relation reads")
+            target = utcnow() if at is None else ensure_utc(at, "at")
+            return self.store.relation_edges_known_at(entity_id, to_rfc3339(target))
+
+        if time_mode == "valid":
+            if at is not None and time_window is not None:
+                raise ValidationError("valid relation reads accept either at or time_window, not both")
+            if time_window is not None:
+                start = ensure_utc(time_window[0], "time_window[0]")
+                end = ensure_utc(time_window[1], "time_window[1]")
+                if start >= end:
+                    return []
+                return self.store.relation_edges_valid_in_window(entity_id, start, end)
+            target = utcnow() if at is None else ensure_utc(at, "at")
+            return self.store.relation_edges_valid_at(entity_id, target)
+
+        raise ValidationError(f"unsupported time_mode: {time_mode}")
+
+    def relation_history(
+        self,
+        entity_id: str,
+        *,
+        relation_type: str | None = None,
+        other_entity_id: str | None = None,
+        time_mode: Literal["known", "valid"] = "known",
+    ) -> list[RelationHistoryEntry]:
+        if time_mode == "known":
+            events = self.store.relation_events_known_visible_at(entity_id, to_rfc3339(utcnow()))
+            return self._build_relation_history(
+                entity_id=entity_id,
+                relation_type=relation_type,
+                other_entity_id=other_entity_id,
+                events=events,
+                basis="known",
+            )
+
+        if time_mode == "valid":
+            events = sorted(self.store.relation_events_valid_visible(entity_id), key=valid_event_sort_key)
+            return self._build_relation_history(
+                entity_id=entity_id,
+                relation_type=relation_type,
+                other_entity_id=other_entity_id,
+                events=events,
+                basis="valid",
+            )
+
+        raise ValidationError(f"unsupported time_mode: {time_mode}")
+
     def reprocess(
         self,
         *,
@@ -302,6 +361,54 @@ class Engram:
                     )
                 )
                 current[key] = new_value
+        return history
+
+    def _build_relation_history(
+        self,
+        *,
+        entity_id: str,
+        relation_type: str | None,
+        other_entity_id: str | None,
+        events: list[Event],
+        basis: Literal["known", "valid"],
+    ) -> list[RelationHistoryEntry]:
+        history: list[RelationHistoryEntry] = []
+        for event in events:
+            if not event.type.startswith("relation."):
+                continue
+            source = str(event.data["source"])
+            target = str(event.data["target"])
+            if entity_id == source:
+                direction: Literal["outgoing", "incoming"] = "outgoing"
+                other_id = target
+            elif entity_id == target:
+                direction = "incoming"
+                other_id = source
+            else:
+                continue
+            current_relation_type = str(event.data["type"])
+            if relation_type is not None and current_relation_type != relation_type:
+                continue
+            if other_entity_id is not None and other_id != other_entity_id:
+                continue
+            history.append(
+                RelationHistoryEntry(
+                    entity_id=entity_id,
+                    other_entity_id=other_id,
+                    relation_type=current_relation_type,
+                    direction=direction,
+                    action=event.type.split(".", 1)[1],  # type: ignore[arg-type]
+                    attrs=dict(event.data.get("attrs", {})),
+                    observed_at=event.observed_at,
+                    effective_at_start=event.effective_at_start,
+                    effective_at_end=event.effective_at_end,
+                    recorded_at=event.recorded_at,
+                    reason=event.reason,
+                    confidence=event.confidence,
+                    basis=basis,
+                    event_id=event.id,
+                )
+            )
         return history
 
     def raw_get(self, turn_id: str) -> RawTurn | None:

@@ -597,7 +597,7 @@ class EventStore:
 
         return self.fold_relation_edges(
             entity_id,
-            self.entity_events_known_visible_at(entity_id, recorded_at),
+            self.relation_events_known_visible_at(entity_id, recorded_at),
             endpoint_active=endpoint_active,
         )
 
@@ -612,7 +612,7 @@ class EventStore:
         return self.fold_relation_edges_valid_at(
             entity_id,
             at,
-            events=self.entity_events_valid_visible(entity_id),
+            events=self.relation_events_valid_visible(entity_id),
             endpoint_active=endpoint_active,
         )
 
@@ -637,9 +637,23 @@ class EventStore:
             entity_id,
             start_at,
             end_at,
-            events=self.entity_events_valid_visible(entity_id),
+            events=self.relation_events_valid_visible(entity_id),
             endpoint_active_in_window=endpoint_active_in_window,
         )
+
+    def relation_events_known_visible_at(self, entity_id: str, recorded_at: str) -> list[Event]:
+        return [
+            event
+            for event in self.entity_events_known_visible_at(entity_id, recorded_at)
+            if event.type.startswith("relation.")
+        ]
+
+    def relation_events_valid_visible(self, entity_id: str) -> list[Event]:
+        return [
+            event
+            for event in self.entity_events_valid_visible(entity_id)
+            if event.type.startswith("relation.")
+        ]
 
     def fold_entity_events(self, entity_id: str, events: list[Event]) -> FoldedEntityState | None:
         entity_type = "unknown"

@@ -142,6 +142,24 @@ class HistoryEntry:
     event_id: str
 
 
+@dataclass(slots=True)
+class RelationHistoryEntry:
+    entity_id: str
+    other_entity_id: str
+    relation_type: str
+    direction: RelationDirection
+    action: Literal["create", "update", "delete"]
+    attrs: dict[str, Any]
+    observed_at: datetime
+    effective_at_start: datetime | None
+    effective_at_end: datetime | None
+    recorded_at: datetime
+    reason: str | None
+    confidence: float | None
+    basis: Literal["known", "valid"]
+    event_id: str
+
+
 @dataclass(frozen=True, slots=True)
 class RelationEdge:
     relation_type: str
