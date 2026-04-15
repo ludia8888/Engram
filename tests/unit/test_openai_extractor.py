@@ -297,3 +297,76 @@ def test_normalize_batch_does_not_merge_create_and_delete(monkeypatch):
     assert len(events) == 2
     assert events[0].type == "entity.create"
     assert events[1].type == "entity.delete"
+
+
+def test_relation_endpoint_resolves_from_batch_entity_create(monkeypatch):
+    _install_fake_openai(
+        monkeypatch,
+        [
+            {
+                "events": [
+                    {
+                        "type": "entity.create",
+                        "data": {"id": "Bob", "type": "person", "attrs": {"name": "Bob"}},
+                        "confidence": 0.9,
+                        "reason": "person created",
+                    },
+                    {
+                        "type": "relation.create",
+                        "data": {
+                            "source": "self",
+                            "target": "Bob",
+                            "type": "friend",
+                            "attrs": {},
+                        },
+                        "confidence": 0.9,
+                        "reason": "relation to Bob",
+                    },
+                ]
+            }
+        ],
+    )
+    extractor = OpenAIExtractor()
+    extractor.bind_runtime_context(
+        safe_user_id="alice",
+        recent_turns_provider=lambda item, limit: [],
+    )
+
+    events = extractor.extract(_queue_item())
+
+    entity_event = next(e for e in events if e.type == "entity.create")
+    relation_event = next(e for e in events if e.type == "relation.create")
+    assert entity_event.data["id"] == "person:bob"
+    assert relation_event.data["target"] == "person:bob"
+
+
+def test_relation_endpoint_falls_back_to_entity_when_no_batch_context(monkeypatch):
+    _install_fake_openai(
+        monkeypatch,
+        [
+            {
+                "events": [
+                    {
+                        "type": "relation.create",
+                        "data": {
+                            "source": "self",
+                            "target": "Seoul",
+                            "type": "lives_in",
+                            "attrs": {},
+                        },
+                        "confidence": 0.9,
+                        "reason": "place without entity.create",
+                    },
+                ]
+            }
+        ],
+    )
+    extractor = OpenAIExtractor()
+    extractor.bind_runtime_context(
+        safe_user_id="alice",
+        recent_turns_provider=lambda item, limit: [],
+    )
+
+    events = extractor.extract(_queue_item())
+
+    assert events[0].data["target"] == "entity:seoul"
