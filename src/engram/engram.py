@@ -14,6 +14,7 @@ from .projector import Projector
 from .recovery import RecoveryService
 from .retrieval import RetrievalEngine
 from .storage import EventStore, SegmentedRawLog, WriterLock, open_connection
+from .storage.store import valid_event_sort_key
 from .time_utils import ensure_utc, to_rfc3339, utcnow
 from .types import Entity, Event, HistoryEntry, QueueItem, RawTurn, SearchResult, TemporalEntityView, TurnAck
 
@@ -197,57 +198,38 @@ class Engram:
         )
 
     def known_history(self, entity_id: str, attr: str | None = None) -> list[HistoryEntry]:
-        events = self.store.entity_events(entity_id)
-        current: dict = {}
-        history: list[HistoryEntry] = []
-        for event in events:
-            if not event.type.startswith("entity.") or event.data["id"] != entity_id:
-                continue
-            if event.type == "entity.delete":
-                current.clear()
-                continue
-            attrs = event.data["attrs"] if event.type in {"entity.create", "entity.update"} else {}
-            for key, new_value in attrs.items():
-                if attr and key != attr:
-                    continue
-                old_value = current.get(key)
-                if old_value == new_value:
-                    continue
-                history.append(
-                    HistoryEntry(
-                        entity_id=entity_id,
-                        attr=key,
-                        old_value=old_value,
-                        new_value=new_value,
-                        observed_at=event.observed_at,
-                        effective_at_start=event.effective_at_start,
-                        effective_at_end=event.effective_at_end,
-                        recorded_at=event.recorded_at,
-                        reason=event.reason,
-                        confidence=event.confidence,
-                        basis="known",
-                        event_id=event.id,
-                    )
-                )
-                current[key] = new_value
-        return history
+        return self._build_history(
+            entity_id=entity_id,
+            attr=attr,
+            events=self.store.entity_events(entity_id),
+            basis="known",
+            skip_unknown_effective=False,
+        )
 
     def valid_history(self, entity_id: str, attr: str | None = None) -> list[HistoryEntry]:
-        events = sorted(
-            self.store.entity_events(entity_id),
-            key=lambda event: (
-                event.effective_at_start is None,
-                event.effective_at_start or event.recorded_at,
-                event.recorded_at,
-                event.seq,
-            ),
+        return self._build_history(
+            entity_id=entity_id,
+            attr=attr,
+            events=sorted(self.store.entity_events(entity_id), key=valid_event_sort_key),
+            basis="valid",
+            skip_unknown_effective=True,
         )
+
+    def _build_history(
+        self,
+        *,
+        entity_id: str,
+        attr: str | None,
+        events: list[Event],
+        basis: Literal["known", "valid"],
+        skip_unknown_effective: bool,
+    ) -> list[HistoryEntry]:
         current: dict = {}
         history: list[HistoryEntry] = []
         for event in events:
             if not event.type.startswith("entity.") or event.data["id"] != entity_id:
                 continue
-            if event.effective_at_start is None:
+            if skip_unknown_effective and event.effective_at_start is None:
                 continue
             if event.type == "entity.delete":
                 current.clear()
@@ -271,7 +253,7 @@ class Engram:
                         recorded_at=event.recorded_at,
                         reason=event.reason,
                         confidence=event.confidence,
-                        basis="valid",
+                        basis=basis,
                         event_id=event.id,
                     )
                 )

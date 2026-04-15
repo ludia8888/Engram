@@ -389,12 +389,7 @@ class EventStore:
     def fold_entity_events_valid_at(self, entity_id: str, at: datetime) -> FoldedValidEntityState | None:
         events = sorted(
             self.entity_events(entity_id),
-            key=lambda event: (
-                event.effective_at_start is None,
-                event.effective_at_start or datetime.max.replace(tzinfo=UTC),
-                event.recorded_at,
-                event.seq,
-            ),
+            key=valid_event_sort_key,
         )
         entity_type = "unknown"
         attrs: dict[str, Any] = {}
@@ -486,3 +481,12 @@ def _merge_unknown_attrs(existing: list[str], new_keys) -> list[str]:
         seen.add(key)
         merged.append(str(key))
     return merged
+
+
+def valid_event_sort_key(event: Event) -> tuple[bool, datetime, datetime, int]:
+    return (
+        event.effective_at_start is None,
+        event.effective_at_start or datetime.max.replace(tzinfo=UTC),
+        event.recorded_at,
+        event.seq,
+    )

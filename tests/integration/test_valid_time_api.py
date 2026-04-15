@@ -96,3 +96,51 @@ def test_valid_history_orders_by_effective_time_and_skips_unknown_time_events(tm
     assert history[1].basis == "valid"
 
     mem.close()
+
+
+def test_get_valid_at_uses_half_open_effective_interval(tmp_path):
+    mem = Engram(user_id="alice", path=str(tmp_path))
+    mem.append(
+        "entity.create",
+        {"id": "user:alice", "type": "user", "attrs": {"location": "Seoul"}},
+        observed_at=dt("2026-05-01T10:00:00Z"),
+        effective_at_start=dt("2026-05-01T00:00:00Z"),
+        effective_at_end=dt("2026-05-08T00:00:00Z"),
+        time_confidence="exact",
+    )
+    mem.append(
+        "entity.update",
+        {"id": "user:alice", "attrs": {"location": "Busan"}},
+        observed_at=dt("2026-05-08T09:00:00Z"),
+        effective_at_start=dt("2026-05-08T00:00:00Z"),
+        time_confidence="exact",
+    )
+
+    just_before = mem.get_valid_at("user:alice", dt("2026-05-07T23:59:59Z"))
+    at_boundary = mem.get_valid_at("user:alice", dt("2026-05-08T00:00:00Z"))
+
+    assert just_before is not None
+    assert just_before.attrs == {"location": "Seoul"}
+    assert at_boundary is not None
+    assert at_boundary.attrs == {"location": "Busan"}
+
+    mem.close()
+
+
+def test_get_valid_at_returns_unknown_attrs_even_without_active_state(tmp_path):
+    mem = Engram(user_id="alice", path=str(tmp_path))
+    mem.append(
+        "entity.update",
+        {"id": "user:alice", "attrs": {"location": "Busan"}},
+        observed_at=dt("2026-05-10T10:00:00Z"),
+        time_confidence="unknown",
+    )
+
+    view = mem.get_valid_at("user:alice", dt("2026-05-15T12:00:00Z"))
+
+    assert view is not None
+    assert view.attrs == {}
+    assert view.unknown_attrs == ["location"]
+    assert view.basis == "valid"
+
+    mem.close()
