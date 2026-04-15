@@ -89,20 +89,39 @@ Engram core는 하지 않는다:
 
 ## 2. Quick Start
 
-### 2.1 설치
+### 2.1 현재 구현 기준 설치
 
 ```bash
-pip install engram-db
+python3.12 -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev]"
 ```
 
-기본 의존성:
-- Python 3.10+
+현재 코드 기준:
+- 패키지 메타데이터 이름은 `engram`
+- Python `>=3.12`
 - `sqlite3`
+- `pytest`, `hypothesis`는 개발용 의존성
+
+로드맵 의존성:
 - `sqlite-vec` 또는 호환 벡터 확장
 - 로컬 임베딩 또는 API 임베딩 제공자
 - 추출용 LLM provider
 
-### 2.2 기본 사용
+### 2.2 현재 구현된 최소 사용 예
+
+현재 저장소의 Phase 1 구현에서 실제로 동작하는 API는 아래 범위다.
+
+- `turn()`
+- `append()`
+- `get()`
+- `get_known_at()`
+- `known_history()`
+- `raw_get()`, `raw_recent()`
+
+주의:
+- Phase 1의 `append()`는 현재 `entity.*` 이벤트만 런타임에서 허용한다.
+- `relation.*` 이벤트는 설계상 존재하지만 실제 read path가 준비되기 전까지는 거절된다.
 
 ```python
 from engram import Engram
@@ -114,29 +133,39 @@ ack = mem.turn(
     assistant="알겠습니다. 채식 가능한 도쿄 식당도 추천할게요.",
 )
 
-# raw durability는 여기까지 보장
+# 지금 보장되는 건 raw durability와 enqueue 결과
 print(ack.turn_id, ack.durable_at, ack.queued)
 
-# 구조화 메모리까지 보고 싶으면 visibility level을 기다림
-mem.flush(level="canonical")
-
-context = mem.context(
-    query="저녁 뭐 먹을까?",
-    time_mode="known",
-    max_tokens=1600,
+# Phase 1에서는 canonical 이벤트는 append()로 직접 넣는다
+mem.append(
+    "entity.create",
+    {
+        "id": "user:alice",
+        "type": "user",
+        "attrs": {"diet": "vegetarian"},
+    },
+    source_role="manual",
+    time_confidence="exact",
 )
+
+current = mem.get("user:alice")
+past = mem.get_known_at("user:alice", ack.durable_at)
+history = mem.known_history("user:alice")
 ```
 
-### 2.3 중요한 사용 규칙
+### 2.3 현재 구현에서 중요한 사용 규칙
 
 비개발자 관점에서 쉽게 말하면:
 
 - `turn()`은 "메모리 엔진이 대화를 잃어버리지 않게 저장했다"는 뜻이다.
-- 그렇다고 곧바로 "AI가 이미 그 사실을 이해해서 구조화했다"는 뜻은 아니다.
-- `flush(level="canonical")`는 구조화 이벤트가 커밋될 때까지 기다린다.
-- `flush(level="projection")`는 검색용 상태/인덱스까지 반영될 때까지 기다린다.
+- `ack.queued=True`면 다음 단계 처리를 위해 큐에 들어갔다는 뜻이다.
+- `ack.queued=False`면 원본 저장은 성공했지만 큐에는 못 들어간 상태다.
+- Phase 1에서는 `turn()`이 canonical 이벤트를 자동 생성하지 않는다.
+- 현재 구조화 메모리는 `append()`와 `get_known_at()` 중심으로 검증된다.
 
-### 2.4 Quick Start 예시 앱
+### 2.4 로드맵 예시 API
+
+아래 예시는 문서가 목표로 하는 미래형 사용 방식이며, 현재 Phase 1 코드에는 아직 구현되지 않았다.
 
 ```python
 class ChatBot:
@@ -584,7 +613,14 @@ v2.3에서는 raw durability와 canonical store 정합성을 우선하기 때문
 
 ## 7. Public API
 
-### 7.1 Engram 클래스
+### 7.1 상태 표기 원칙
+
+- `Implemented (Phase 1)`: 현재 저장소 코드에 이미 있음
+- `Planned (Phase 2+)`: 문서에만 있고 아직 구현되지 않음
+
+### 7.2 `Engram` 클래스
+
+Status: `Implemented (Phase 1)`
 
 ```python
 class Engram:
@@ -593,18 +629,19 @@ class Engram:
         user_id: str = "default",
         path: str | None = None,
         session_id: str | None = None,
-        extraction: Literal["local", "llm", "hybrid"] = "hybrid",
-        llm_client: Any | None = None,
-        extractor_version: str = "v1",
-        embedding: Literal["local", "openai", "custom"] = "local",
-        embedding_fn: Callable[[list[str]], list[list[float]]] | None = None,
-        embedding_dim: int | None = None,
         queue_max_size: int = 10000,
         queue_put_timeout: float = 1.0,
     ): ...
 ```
 
-### 7.2 Write API
+향후 Phase 2+에서 추가 예정:
+- extraction 관련 인자
+- embedding 관련 인자
+- retrieval/context 관련 옵션
+
+### 7.3 Write API
+
+Status: `Implemented (Phase 1)`
 
 ```python
 def turn(
@@ -637,9 +674,14 @@ def append(
 
 규칙:
 - `turn()`은 L0 raw durability까지만 즉시 보장한다.
+- queue enqueue가 실패해도 raw append가 성공했다면 `turn()`은 예외 대신 `TurnAck(..., queued=False)`를 반환한다.
 - `append()`는 L1 canonical commit을 동기 수행한다.
+- 현재 Phase 1 런타임에서 `append()`가 허용하는 structured 이벤트는 `entity.create`, `entity.update`, `entity.delete`뿐이다.
+- `relation.*`은 설계 로드맵에는 있지만, 실제 replay/query가 준비되기 전까지는 `ValidationError`로 거절한다.
 
-### 7.3 Flush API
+### 7.4 Flush API
+
+Status: `Planned (Phase 2)`
 
 ```python
 def flush(
@@ -651,7 +693,11 @@ def flush(
     ...
 ```
 
-### 7.4 Query API
+### 7.5 Query API
+
+Status:
+- `get()`, `get_known_at()`, `known_history()` = `Implemented (Phase 1)`
+- `get_valid_at()`, `valid_history()` = `Planned (Phase 4)`
 
 ```python
 def get(self, entity_id: str) -> Entity | None:
@@ -673,7 +719,9 @@ def valid_history(self, entity_id: str, attr: str | None = None) -> list[History
 제거된 API:
 - `get_at()`는 v2.3에서 삭제한다. 의미가 둘로 갈라지기 때문이다.
 
-### 7.5 Retrieval API
+### 7.6 Retrieval API
+
+Status: `Planned (Phase 3)`
 
 ```python
 def search(
@@ -699,7 +747,11 @@ def context(
     ...
 ```
 
-### 7.6 Maintenance API
+### 7.7 Maintenance API
+
+Status:
+- `rebuild_projection()` = `Planned (Phase 2)`
+- `reprocess()` = `Planned (Phase 2+)`
 
 ```python
 def reprocess(
@@ -721,7 +773,9 @@ def rebuild_projection(
     ...
 ```
 
-### 7.7 Raw API
+### 7.8 Raw API
+
+Status: `Implemented (Phase 1)`
 
 ```python
 def raw_recent(self, limit: int = 20) -> list[RawTurn]:
@@ -1174,6 +1228,7 @@ v2.3 core는 최소한 다음 정책 지점을 문서에 남긴다.
 
 - 동일 사용자에 대해 writer는 1개만 허용
 - writer는 file lock을 잡는다
+- lockfile에는 최소한 `pid`, `created_at`를 저장하고, dead PID면 stale lock으로 자동 회수한다
 - reader는 thread-local read-only connection 사용
 - same-user multi-process writer는 지원하지 않는다
 

@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 name = "engram"
 version = "0.1.0"
 description = "Embedded event-sourced memory engine for LLM applications"
-readme = "engram_design_v2.1.md"
+readme = "engram_design_v2.3.md"
 requires-python = ">=3.12"
 dependencies = []
 
@@ -22,4 +22,3 @@ packages = ["src/engram"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
-

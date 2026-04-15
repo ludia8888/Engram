@@ -5,8 +5,9 @@ import re
 from pathlib import Path
 from uuid import uuid4
 
-from .errors import QueueFullError, ValidationError
+from .errors import ValidationError
 from .storage import EventStore, SegmentedRawLog, WriterLock, open_connection
+from .storage.store import DirtyRangeRow
 from .time_utils import ensure_utc, to_rfc3339, utcnow
 from .types import Entity, Event, HistoryEntry, QueueItem, RawTurn, TemporalEntityView, TurnAck
 
@@ -70,8 +71,13 @@ class Engram:
         item = QueueItem.from_turn(turn)
         try:
             self.queue.put(item, timeout=self.queue_put_timeout)
-        except queue.Full as exc:
-            raise QueueFullError("turn queue is full") from exc
+        except queue.Full:
+            return TurnAck(
+                turn_id=ack.turn_id,
+                observed_at=ack.observed_at,
+                durable_at=ack.durable_at,
+                queued=False,
+            )
         return ack
 
     def append(
@@ -121,11 +127,12 @@ class Engram:
         return event.id
 
     def get(self, entity_id: str) -> Entity | None:
-        view = self.get_known_at(entity_id, utcnow())
+        now = utcnow()
+        view = self.get_known_at(entity_id, now)
         if view is None:
             return None
-        history = self.store.entity_events_visible_at(entity_id, to_rfc3339(utcnow()))
-        created_at = history[0].recorded_at if history else utcnow()
+        history = self.store.entity_events_visible_at(entity_id, to_rfc3339(now))
+        created_at = history[0].recorded_at if history else now
         updated_at = history[-1].recorded_at if history else created_at
         return Entity(
             id=view.entity_id,
@@ -233,16 +240,9 @@ class Engram:
                 raise ValidationError("entity.delete requires string id")
             return
         if event_type in {"relation.create", "relation.update"}:
-            if not all(isinstance(data.get(key), str) for key in ("source", "target", "type")):
-                raise ValidationError(f"{event_type} requires source/target/type strings")
-            if "attrs" in data and not isinstance(data["attrs"], dict):
-                raise ValidationError(f"{event_type} attrs must be dict when present")
-            data.setdefault("attrs", {})
-            return
+            raise ValidationError(f"{event_type} is planned but not implemented in Phase 1")
         if event_type == "relation.delete":
-            if not all(isinstance(data.get(key), str) for key in ("source", "target", "type")):
-                raise ValidationError("relation.delete requires source/target/type strings")
-            return
+            raise ValidationError("relation.delete is planned but not implemented in Phase 1")
         raise ValidationError(f"unsupported event type: {event_type}")
 
     def _derive_event_entities(self, event: Event) -> list[tuple[str, str]]:
@@ -257,13 +257,13 @@ class Engram:
         self,
         event: Event,
         event_entities: list[tuple[str, str]],
-    ) -> list[tuple[str, str | None, str | None, str, str]]:
+    ) -> list[DirtyRangeRow]:
         created_at = to_rfc3339(utcnow())
         from_recorded_at = to_rfc3339(event.recorded_at)
         from_effective_at = (
             to_rfc3339(event.effective_at_start) if event.effective_at_start else None
         )
-        rows = []
+        rows: list[DirtyRangeRow] = []
         for entity_id, _role in event_entities:
             rows.append(
                 (
@@ -276,4 +276,3 @@ class Engram:
                 )
             )
         return rows
-

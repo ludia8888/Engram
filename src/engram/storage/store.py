@@ -4,9 +4,12 @@ import json
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
+from typing import TypeAlias
 
 from engram.time_utils import from_rfc3339, to_rfc3339
 from engram.types import Event
+
+DirtyRangeRow: TypeAlias = tuple[str, str, str, str | None, str, str]
 
 
 def open_connection(db_path: Path) -> sqlite3.Connection:
@@ -87,7 +90,7 @@ class EventStore:
     def mark_dirty(
         self,
         tx: sqlite3.Connection,
-        rows: list[tuple[str, str | None, str | None, str, str]],
+        rows: list[DirtyRangeRow],
     ) -> None:
         if not rows:
             return
@@ -154,4 +157,3 @@ class EventStore:
             caused_by=row["caused_by"],
             schema_version=int(row["schema_version"]),
         )
-
