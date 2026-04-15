@@ -161,6 +161,15 @@ class RelationHistoryEntry:
 
 
 @dataclass(frozen=True, slots=True)
+class ProjectionRebuildResult:
+    scope: Literal["dirty", "owner", "full"]
+    target_owner_id: str | None
+    rebuilt_owner_count: int
+    dirty_owner_count_before: int
+    dirty_owner_count_after: int
+
+
+@dataclass(frozen=True, slots=True)
 class RelationEdge:
     relation_type: str
     other_entity_id: str

@@ -364,3 +364,106 @@ def test_rebuild_dirty_retracts_deleted_relation_from_relation_snapshot(tmp_path
 
     assert "user:alice" not in projector.current_relation_snapshot()
     assert "user:bob" not in projector.current_relation_snapshot()
+
+
+def test_rebuild_owner_retracts_owner_and_related_neighbors_only(tmp_path):
+    conn = open_connection(tmp_path / "engram.db")
+    store = EventStore(conn)
+    projector = Projector(store)
+
+    with store.transaction() as tx:
+        alice = _event(
+            str(uuid4()),
+            store.next_seq(tx),
+            "entity.create",
+            {"id": "user:alice", "type": "user", "attrs": {"name": "Alice"}},
+        )
+        store.append_event(tx, alice)
+        store.append_event_entities(tx, alice.id, [("user:alice", "subject")])
+        _mark_dirty(store, tx, alice)
+
+        bob = _event(
+            str(uuid4()),
+            store.next_seq(tx),
+            "entity.create",
+            {"id": "user:bob", "type": "user", "attrs": {"name": "Bob"}},
+        )
+        store.append_event(tx, bob)
+        store.append_event_entities(tx, bob.id, [("user:bob", "subject")])
+        _mark_dirty(store, tx, bob)
+
+        relation = _event(
+            str(uuid4()),
+            store.next_seq(tx),
+            "relation.create",
+            {"source": "user:alice", "target": "user:bob", "type": "manager", "attrs": {"scope": "engram"}},
+        )
+        store.append_event(tx, relation)
+        store.append_event_entities(tx, relation.id, [("user:alice", "source"), ("user:bob", "target")])
+        _mark_dirty_from_event_entities(store, tx, relation)
+
+    projector.rebuild_dirty()
+
+    with store.transaction() as tx:
+        deleted = _event(
+            str(uuid4()),
+            store.next_seq(tx),
+            "entity.delete",
+            {"id": "user:alice"},
+        )
+        store.append_event(tx, deleted)
+        store.append_event_entities(tx, deleted.id, [("user:alice", "subject")])
+        _mark_dirty(store, tx, deleted)
+        bob_update = _event(
+            str(uuid4()),
+            store.next_seq(tx),
+            "entity.update",
+            {"id": "user:bob", "attrs": {"role": "lead"}},
+        )
+        store.append_event(tx, bob_update)
+        store.append_event_entities(tx, bob_update.id, [("user:bob", "subject")])
+        _mark_dirty(store, tx, bob_update)
+        charlie = _event(
+            str(uuid4()),
+            store.next_seq(tx),
+            "entity.create",
+            {"id": "user:charlie", "type": "user", "attrs": {"name": "Charlie"}},
+        )
+        store.append_event(tx, charlie)
+        store.append_event_entities(tx, charlie.id, [("user:charlie", "subject")])
+        _mark_dirty(store, tx, charlie)
+
+    assert set(store.dirty_owner_ids()) == {"user:alice", "user:bob", "user:charlie"}
+
+    rebuilt = projector.rebuild_owner(
+        "user:alice",
+        related_owner_ids=["user:bob"],
+    )
+
+    assert rebuilt == 2
+    assert "user:alice" not in projector.current_snapshot()
+    assert "user:alice" not in projector.current_relation_snapshot()
+    assert "user:bob" not in projector.current_relation_snapshot()
+    assert set(store.dirty_owner_ids()) == {"user:charlie"}
+
+
+def test_rebuild_dirty_until_stable_raises_when_no_progress_is_possible(tmp_path, monkeypatch):
+    conn = open_connection(tmp_path / "engram.db")
+    store = EventStore(conn)
+    projector = Projector(store)
+
+    with store.transaction() as tx:
+        created = _event(
+            str(uuid4()),
+            store.next_seq(tx),
+            "entity.create",
+            {"id": "user:alice", "type": "user", "attrs": {"diet": "vegetarian"}},
+        )
+        store.append_event(tx, created)
+        store.append_event_entities(tx, created.id, [("user:alice", "subject")])
+        _mark_dirty(store, tx, created)
+
+    monkeypatch.setattr(projector, "rebuild_dirty", lambda: 0)
+
+    with pytest.raises(RuntimeError, match="made no progress"):
+        projector.rebuild_dirty_until_stable()

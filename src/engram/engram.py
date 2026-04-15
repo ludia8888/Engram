@@ -18,7 +18,18 @@ from .semantic_index import SemanticIndexer
 from .storage import EventStore, SegmentedRawLog, WriterLock, open_connection
 from .storage.store import valid_event_sort_key
 from .time_utils import ensure_utc, to_rfc3339, utcnow
-from .types import Entity, Event, HistoryEntry, QueueItem, RawTurn, RelationEdge, SearchResult, TemporalEntityView, TurnAck
+from .types import (
+    Entity,
+    Event,
+    HistoryEntry,
+    ProjectionRebuildResult,
+    QueueItem,
+    RawTurn,
+    RelationEdge,
+    SearchResult,
+    TemporalEntityView,
+    TurnAck,
+)
 from .types import RelationHistoryEntry
 
 
@@ -318,6 +329,51 @@ class Engram:
             count += 1
         return count
 
+    def rebuild_projection(
+        self,
+        *,
+        owner_id: str | None = None,
+        mode: Literal["dirty", "full"] = "dirty",
+    ) -> ProjectionRebuildResult:
+        dirty_owner_count_before = len(self.store.dirty_owner_ids())
+
+        if mode == "dirty":
+            if owner_id is None:
+                rebuilt_owner_count = self.projector.rebuild_dirty_until_stable()
+                scope: Literal["dirty", "owner", "full"] = "dirty"
+                target_owner_id = None
+            else:
+                current_relation_neighbors = [
+                    edge.other_entity_id
+                    for edge in self.projector.current_relation_snapshot().get(owner_id, ())
+                ]
+                canonical_relation_neighbors = [
+                    edge.other_entity_id for edge in self.store.materialize_current_relations(owner_id)
+                ]
+                rebuilt_owner_count = self.projector.rebuild_owner(
+                    owner_id,
+                    related_owner_ids=current_relation_neighbors + canonical_relation_neighbors,
+                )
+                scope = "owner"
+                target_owner_id = owner_id
+        elif mode == "full":
+            if owner_id is not None:
+                raise ValidationError("owner_id is not supported when mode='full'")
+            rebuilt_owner_count = self.projector.rebuild_all()
+            scope = "full"
+            target_owner_id = None
+        else:
+            raise ValidationError(f"unsupported rebuild mode: {mode}")
+
+        dirty_owner_count_after = len(self.store.dirty_owner_ids())
+        return ProjectionRebuildResult(
+            scope=scope,
+            target_owner_id=target_owner_id,
+            rebuilt_owner_count=rebuilt_owner_count,
+            dirty_owner_count_before=dirty_owner_count_before,
+            dirty_owner_count_after=dirty_owner_count_after,
+        )
+
     def _build_history(
         self,
         *,
@@ -486,10 +542,7 @@ class Engram:
                 finally:
                     self.queue.task_done()
         if level == "projection":
-            while self.store.count_dirty_ranges() > 0:
-                rebuilt = self.projector.rebuild_dirty()
-                if rebuilt == 0 and self.store.count_dirty_ranges() > 0:
-                    raise RuntimeError("projection flush made no progress")
+            self.rebuild_projection(mode="dirty")
             return
         if level == "index":
             self.semantic_indexer.index_missing()
