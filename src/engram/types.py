@@ -1,0 +1,105 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Any, Literal
+
+
+SourceRole = Literal["user", "assistant", "tool", "system", "manual"]
+TimeConfidence = Literal["exact", "inferred", "unknown"]
+
+
+@dataclass(slots=True)
+class TurnAck:
+    turn_id: str
+    observed_at: datetime
+    durable_at: datetime
+    queued: bool
+
+
+@dataclass(slots=True)
+class RawTurn:
+    id: str
+    session_id: str | None
+    observed_at: datetime
+    user: str
+    assistant: str
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class QueueItem:
+    turn_id: str
+    observed_at: datetime
+    session_id: str | None
+    user: str
+    assistant: str
+    metadata: dict[str, Any]
+
+    @classmethod
+    def from_turn(cls, turn: RawTurn) -> "QueueItem":
+        return cls(
+            turn_id=turn.id,
+            observed_at=turn.observed_at,
+            session_id=turn.session_id,
+            user=turn.user,
+            assistant=turn.assistant,
+            metadata=dict(turn.metadata),
+        )
+
+
+@dataclass(slots=True)
+class Event:
+    id: str
+    seq: int
+    observed_at: datetime
+    effective_at_start: datetime | None
+    effective_at_end: datetime | None
+    recorded_at: datetime
+    type: str
+    data: dict[str, Any]
+    extraction_run_id: str | None
+    source_turn_id: str | None
+    source_role: SourceRole
+    confidence: float | None
+    reason: str | None
+    time_confidence: TimeConfidence
+    caused_by: str | None
+    schema_version: int
+
+
+@dataclass(slots=True)
+class Entity:
+    id: str
+    type: str
+    attrs: dict[str, Any]
+    created_recorded_at: datetime
+    updated_recorded_at: datetime
+
+
+@dataclass(slots=True)
+class TemporalEntityView:
+    entity_id: str
+    entity_type: str
+    attrs: dict[str, Any]
+    unknown_attrs: list[str]
+    supporting_event_ids: list[str]
+    basis: Literal["known", "valid"]
+    as_of: datetime
+
+
+@dataclass(slots=True)
+class HistoryEntry:
+    entity_id: str
+    attr: str
+    old_value: Any
+    new_value: Any
+    observed_at: datetime
+    effective_at_start: datetime | None
+    effective_at_end: datetime | None
+    recorded_at: datetime
+    reason: str | None
+    confidence: float | None
+    basis: Literal["known", "valid"]
+    event_id: str
+
