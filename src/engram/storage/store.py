@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 import json
 import sqlite3
 from contextlib import contextmanager
@@ -22,6 +22,16 @@ class FoldedEntityState:
     supporting_event_ids: list[str]
     created_recorded_at: datetime | None
     updated_recorded_at: datetime | None
+    active: bool
+
+
+@dataclass(slots=True)
+class FoldedValidEntityState:
+    entity_id: str
+    entity_type: str
+    attrs: dict[str, Any]
+    unknown_attrs: list[str]
+    supporting_event_ids: list[str]
     active: bool
 
 
@@ -376,6 +386,58 @@ class EventStore:
             active=active,
         )
 
+    def fold_entity_events_valid_at(self, entity_id: str, at: datetime) -> FoldedValidEntityState | None:
+        events = sorted(
+            self.entity_events(entity_id),
+            key=lambda event: (
+                event.effective_at_start is None,
+                event.effective_at_start or datetime.max.replace(tzinfo=UTC),
+                event.recorded_at,
+                event.seq,
+            ),
+        )
+        entity_type = "unknown"
+        attrs: dict[str, Any] = {}
+        unknown_attrs: list[str] = []
+        supporting_event_ids: list[str] = []
+        active = False
+
+        for event in events:
+            if not event.type.startswith("entity.") or event.data["id"] != entity_id:
+                continue
+            if event.type == "entity.create":
+                entity_type = event.data["type"]
+
+            if not _covers_valid_time(event, at):
+                if _has_unknown_effective_time(event):
+                    unknown_attrs = _merge_unknown_attrs(unknown_attrs, event.data.get("attrs", {}).keys())
+                continue
+
+            supporting_event_ids.append(event.id)
+            if event.type == "entity.create":
+                attrs = dict(event.data["attrs"])
+                active = True
+            elif event.type == "entity.update":
+                if not active:
+                    active = True
+                attrs.update(event.data["attrs"])
+            elif event.type == "entity.delete":
+                attrs = {}
+                active = False
+                unknown_attrs = []
+
+        if not active and not unknown_attrs:
+            return None
+
+        return FoldedValidEntityState(
+            entity_id=entity_id,
+            entity_type=entity_type,
+            attrs=dict(attrs),
+            unknown_attrs=unknown_attrs,
+            supporting_event_ids=supporting_event_ids,
+            active=active,
+        )
+
     def _row_to_event(self, row: sqlite3.Row) -> Event:
         return Event(
             id=row["id"],
@@ -395,3 +457,32 @@ class EventStore:
             caused_by=row["caused_by"],
             schema_version=int(row["schema_version"]),
         )
+
+
+def _covers_valid_time(event: Event, at: datetime) -> bool:
+    if _has_unknown_effective_time(event):
+        return False
+    start = event.effective_at_start
+    end = event.effective_at_end
+    if start is None:
+        return False
+    if start > at:
+        return False
+    if end is not None and at >= end:
+        return False
+    return True
+
+
+def _has_unknown_effective_time(event: Event) -> bool:
+    return event.effective_at_start is None
+
+
+def _merge_unknown_attrs(existing: list[str], new_keys) -> list[str]:
+    seen = set(existing)
+    merged = list(existing)
+    for key in new_keys:
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(str(key))
+    return merged

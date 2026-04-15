@@ -717,7 +717,7 @@ def flush(
 
 Status:
 - `get()`, `get_known_at()`, `known_history()` = `Implemented (Phase 1)`
-- `get_valid_at()`, `valid_history()` = `Planned (Phase 4)`
+- `get_valid_at()`, `valid_history()` = `Implemented (Phase 4 PR1)`
 
 ```python
 def get(self, entity_id: str) -> Entity | None:
@@ -745,7 +745,7 @@ Status:
 - `search(..., time_mode="known")` = `Implemented (Phase 3 PR1)`
 - `context(..., time_mode="known")` = `Implemented (Phase 3 PR1)`
 - semantic / causal ranking = `Planned (Phase 3+)`
-- `time_mode="valid"` = `Planned (Phase 4)`
+- `search/context time_mode="valid"` = `Planned (Phase 4+)`
 
 ```python
 def search(
@@ -1137,6 +1137,12 @@ def restore_known_to(at: datetime) -> StateCache:
 - `effective_at_*`가 질의 시점을 덮는 이벤트만 적용한다
 - `effective time unknown`인 이벤트는 `unknown_attrs`로 밀어낸다
 
+현재 구현된 최소형:
+- `get_valid_at()`는 entity-local replay만 구현한다.
+- 정렬 기준은 `effective_at_start`, 그다음 `recorded_at`, `seq`다.
+- `effective_at_start`가 없는 이벤트는 valid apply에서 제외하고 `unknown_attrs`로 보낸다.
+- `search()/context()`의 `valid` 모드는 아직 연결되지 않았다.
+
 ### 12.4 Projector
 
 projector는 dirty range를 읽고 L2를 rebuild한다.
@@ -1205,6 +1211,7 @@ def append(turn: RawTurn) -> TurnAck:
 - 정렬 기준: `effective_at_start`, `recorded_at`, `seq`
 - reprocess 후 결과가 달라질 수 있다
 - 이건 버그가 아니라 정의된 동작이다
+- 현재 최소 구현은 `effective_at_start`가 없는 이벤트를 히스토리에서 제외한다
 
 ### 14.3 derived change 계산
 

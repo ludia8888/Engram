@@ -181,6 +181,21 @@ class Engram:
             as_of=target,
         )
 
+    def get_valid_at(self, entity_id: str, at) -> TemporalEntityView | None:
+        target = ensure_utc(at, "at")
+        folded = self.store.fold_entity_events_valid_at(entity_id, target)
+        if folded is None:
+            return None
+        return TemporalEntityView(
+            entity_id=folded.entity_id,
+            entity_type=folded.entity_type,
+            attrs=dict(folded.attrs),
+            unknown_attrs=list(folded.unknown_attrs),
+            supporting_event_ids=list(folded.supporting_event_ids),
+            basis="valid",
+            as_of=target,
+        )
+
     def known_history(self, entity_id: str, attr: str | None = None) -> list[HistoryEntry]:
         events = self.store.entity_events(entity_id)
         current: dict = {}
@@ -211,6 +226,52 @@ class Engram:
                         reason=event.reason,
                         confidence=event.confidence,
                         basis="known",
+                        event_id=event.id,
+                    )
+                )
+                current[key] = new_value
+        return history
+
+    def valid_history(self, entity_id: str, attr: str | None = None) -> list[HistoryEntry]:
+        events = sorted(
+            self.store.entity_events(entity_id),
+            key=lambda event: (
+                event.effective_at_start is None,
+                event.effective_at_start or event.recorded_at,
+                event.recorded_at,
+                event.seq,
+            ),
+        )
+        current: dict = {}
+        history: list[HistoryEntry] = []
+        for event in events:
+            if not event.type.startswith("entity.") or event.data["id"] != entity_id:
+                continue
+            if event.effective_at_start is None:
+                continue
+            if event.type == "entity.delete":
+                current.clear()
+                continue
+            attrs = event.data["attrs"] if event.type in {"entity.create", "entity.update"} else {}
+            for key, new_value in attrs.items():
+                if attr and key != attr:
+                    continue
+                old_value = current.get(key)
+                if old_value == new_value:
+                    continue
+                history.append(
+                    HistoryEntry(
+                        entity_id=entity_id,
+                        attr=key,
+                        old_value=old_value,
+                        new_value=new_value,
+                        observed_at=event.observed_at,
+                        effective_at_start=event.effective_at_start,
+                        effective_at_end=event.effective_at_end,
+                        recorded_at=event.recorded_at,
+                        reason=event.reason,
+                        confidence=event.confidence,
+                        basis="valid",
                         event_id=event.id,
                     )
                 )
