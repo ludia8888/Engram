@@ -273,6 +273,33 @@ class EventStore:
         ).fetchall()
         return [str(row["event_id"]) for row in rows]
 
+    def event_ids_with_embeddings(self, embedder_version: str) -> list[str]:
+        rows = self.conn.execute(
+            """
+            SELECT event_id
+            FROM vec_events
+            WHERE embedder_version = ?
+            ORDER BY event_id ASC
+            """,
+            (embedder_version,),
+        ).fetchall()
+        return [str(row["event_id"]) for row in rows]
+
+    def event_ids_by_caused_by(self, caused_by_ids: list[str]) -> list[str]:
+        if not caused_by_ids:
+            return []
+        placeholders = ",".join("?" for _ in caused_by_ids)
+        rows = self.conn.execute(
+            f"""
+            SELECT id
+            FROM events
+            WHERE caused_by IN ({placeholders})
+            ORDER BY id ASC
+            """,
+            caused_by_ids,
+        ).fetchall()
+        return [str(row["id"]) for row in rows]
+
     def successful_source_turn_ids(self, extractor_version: str) -> set[str]:
         rows = self.conn.execute(
             """

@@ -557,6 +557,43 @@ def test_query_embedding_cache_is_separated_by_embedder_version(tmp_path):
     mem.close()
 
 
+def test_search_passes_candidate_ids_into_visible_event_fetch(tmp_path, monkeypatch):
+    mem = Engram(
+        user_id="alice",
+        path=str(tmp_path),
+        embedder=StaticEmbedder(
+            mapping={
+                'entity.create {"attrs": {"location": "Busan"}, "id": "user:alice", "type": "user"} manual': [1.0, 0.0, 0.0],
+            }
+        ),
+    )
+    event_id = mem.append(
+        "entity.create",
+        {"id": "user:alice", "type": "user", "attrs": {"location": "Busan"}},
+        observed_at=dt("2026-05-01T10:00:00Z"),
+    )
+    mem.flush("index")
+
+    original_visible_events_known = mem.store.visible_events_known
+    captured_event_ids: list[list[str] | None] = []
+
+    def spy_visible_events_known(recorded_at, from_recorded_at=None, event_ids=None):
+        captured_event_ids.append(list(event_ids) if event_ids is not None else None)
+        return original_visible_events_known(recorded_at, from_recorded_at=from_recorded_at, event_ids=event_ids)
+
+    monkeypatch.setattr(mem.store, "visible_events_known", spy_visible_events_known)
+
+    results = mem.search("Busan", k=5)
+
+    assert results
+    assert results[0].entity_id == "user:alice"
+    assert captured_event_ids
+    assert captured_event_ids[0] is not None
+    assert event_id in captured_event_ids[0]
+
+    mem.close()
+
+
 def test_flush_index_backfills_vec_events_for_openai_embedder_version(tmp_path, monkeypatch):
     install_fake_openai(
         monkeypatch,

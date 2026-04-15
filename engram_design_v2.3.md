@@ -1104,7 +1104,9 @@ query
 
 현재 구현된 최소형:
 - query token과 event `type/data/reason/source_role`의 lexical match로 seed event를 만든다.
-- lexical path는 먼저 `event_search_terms`로 candidate event id를 좁히고, 그 후보에만 현재 lexical scoring을 적용한다.
+- lexical path는 먼저 `event_search_terms`로 lexical candidate event id를 좁힌다.
+- retrieval는 direct seed 계산 전에 `lexical candidate ∪ current embedder version row 보유 event`만 visible event로 먼저 읽는다.
+- lexical scoring은 그 direct candidate 집합 안에서 lexical 후보에만 적용하고, causal neighbor는 direct seed가 정해진 뒤 필요한 event id만 추가로 읽는다.
 - `flush("index")`로 구축한 `vec_events`를 사용해 current embedder version 기준 semantic cosine score를 계산한다.
 - semantic query embedding은 `(embedder.version, normalized_query)` 기준의 작은 in-memory cache를 사용한다.
 - explicit `caused_by` 링크를 따라 상류 원인과 하류 결과를 1-hop causal expansion 한다.

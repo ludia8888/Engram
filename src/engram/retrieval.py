@@ -88,24 +88,29 @@ class RetrievalEngine:
             return []
 
         tokens = query_tokens(query)
-        candidate_event_ids = self.store.candidate_event_ids_for_search_terms(query_candidate_terms(query))
-        events = visible_events_provider(time_window, None)
-        if not events:
+        lexical_candidate_ids = set(
+            self.store.candidate_event_ids_for_search_terms(query_candidate_terms(query))
+        )
+        semantic_candidate_ids = set(self.store.event_ids_with_embeddings(self.embedder.version))
+        initial_candidate_ids = sorted(lexical_candidate_ids | semantic_candidate_ids)
+        if not initial_candidate_ids:
+            return []
+        direct_events = visible_events_provider(time_window, initial_candidate_ids)
+        if not direct_events:
             return []
 
-        lexical_candidate_ids = set(candidate_event_ids)
         lexical_scores = {
             event.id: (
                 _score_event_lexical(event, tokens)
                 if not lexical_candidate_ids or event.id in lexical_candidate_ids
                 else 0.0
             )
-            for event in events
+            for event in direct_events
         }
-        semantic_scores = self._semantic_scores(query, events)
+        semantic_scores = self._semantic_scores(query, direct_events)
 
         scored_events_by_id: dict[str, ScoredEvent] = {}
-        for event in events:
+        for event in direct_events:
             lexical_score = lexical_scores.get(event.id, 0.0)
             semantic_score = semantic_scores.get(event.id, 0.0)
             if semantic_score > 0:
@@ -129,7 +134,14 @@ class RetrievalEngine:
         if not scored_events_by_id:
             return []
 
-        visible_events_by_id = {event.id: event for event in events}
+        visible_events_by_id = {event.id: event for event in direct_events}
+        causal_candidate_ids = self._causal_candidate_event_ids(
+            seed_events=list(scored_events_by_id.values()),
+            loaded_event_ids=set(visible_events_by_id),
+        )
+        if causal_candidate_ids:
+            for event in visible_events_provider(time_window, causal_candidate_ids):
+                visible_events_by_id.setdefault(event.id, event)
         causal_scores = self._causal_scores(
             seed_events=list(scored_events_by_id.values()),
             visible_events_by_id=visible_events_by_id,
@@ -266,6 +278,24 @@ class RetrievalEngine:
             for event in downstream_by_id.get(scored.event.id, []):
                 scores[event.id] += causal_score
         return dict(scores)
+
+    def _causal_candidate_event_ids(
+        self,
+        *,
+        seed_events: list[ScoredEvent],
+        loaded_event_ids: set[str],
+    ) -> list[str]:
+        seed_ids = [scored.event.id for scored in seed_events if scored.direct_score > 0]
+        if not seed_ids:
+            return []
+        upstream_ids = {
+            scored.event.caused_by
+            for scored in seed_events
+            if scored.direct_score > 0 and scored.event.caused_by is not None
+        }
+        downstream_ids = set(self.store.event_ids_by_caused_by(seed_ids))
+        candidate_ids = (upstream_ids | downstream_ids) - loaded_event_ids
+        return sorted(candidate_ids)
 
     def _query_embedding(self, query: str) -> list[float]:
         normalized_query = query.strip().lower()
