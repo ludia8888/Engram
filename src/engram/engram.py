@@ -13,6 +13,7 @@ from .event_ops import derive_cascade_dirty_rows_for_entity_event, derive_dirty_
 from .projector import Projector
 from .recovery import RecoveryService
 from .retrieval import RetrievalEngine
+from .search_terms import event_search_terms
 from .semantic import Embedder, HashEmbedder
 from .semantic_index import SemanticIndexer
 from .storage import EventStore, SegmentedRawLog, WriterLock, open_connection
@@ -175,6 +176,7 @@ class Engram:
             )
             self.store.append_event(tx, event)
             self.store.append_event_entities(tx, event.id, event_entities)
+            self.store.append_event_search_terms(tx, event.id, event_search_terms(event))
             self.store.mark_dirty(tx, dirty_rows)
         return event.id
 

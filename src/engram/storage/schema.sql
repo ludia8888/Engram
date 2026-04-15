@@ -87,3 +87,11 @@ CREATE TABLE IF NOT EXISTS vec_events (
 );
 
 CREATE INDEX IF NOT EXISTS idx_vec_events_version ON vec_events(embedder_version);
+
+CREATE TABLE IF NOT EXISTS event_search_terms (
+    event_id     TEXT NOT NULL,
+    term         TEXT NOT NULL,
+    PRIMARY KEY(event_id, term)
+);
+
+CREATE INDEX IF NOT EXISTS idx_event_search_terms_term ON event_search_terms(term);

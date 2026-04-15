@@ -53,6 +53,16 @@ class StaticEmbedder:
         return [list(self._mapping.get(text, [0.0] * self.dim)) for text in texts]
 
 
+class CountingEmbedder(StaticEmbedder):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.calls: list[list[str]] = []
+
+    def embed_texts(self, texts: list[str]) -> list[list[float]]:
+        self.calls.append(list(texts))
+        return super().embed_texts(texts)
+
+
 def install_fake_openai(monkeypatch, mapping: dict[str, list[float]], *, dimensions: int | None = None):
     class FakeEmbeddings:
         def create(self, *, model, input, dimensions=None):
@@ -457,6 +467,92 @@ def test_context_uses_semantic_supporting_events_in_valid_mode(tmp_path):
     assert "- mode: valid" in text
     assert "food:ramen" in text
     assert "noodle-soup" in text
+
+    mem.close()
+
+
+def test_flush_index_backfills_missing_lexical_search_terms(tmp_path):
+    mem = Engram(
+        user_id="alice",
+        path=str(tmp_path),
+        embedder=StaticEmbedder(
+            mapping={
+                'entity.create {"attrs": {"diet": "vegetarian"}, "id": "user:alice", "type": "user"} manual': [1.0, 0.0, 0.0],
+            }
+        ),
+    )
+    mem.append(
+        "entity.create",
+        {"id": "user:alice", "type": "user", "attrs": {"diet": "vegetarian"}},
+        observed_at=dt("2026-05-01T10:00:00Z"),
+    )
+    assert mem.store.count_event_search_terms() > 0
+
+    mem.conn.execute("DELETE FROM event_search_terms")
+    mem.conn.commit()
+
+    assert mem.store.count_event_search_terms() == 0
+
+    mem.flush("index")
+
+    assert mem.store.count_event_search_terms() > 0
+    assert mem.search("vegetarian", k=5)[0].entity_id == "user:alice"
+
+    mem.close()
+
+
+def test_repeated_semantic_search_reuses_query_embedding(tmp_path):
+    embedder = CountingEmbedder(
+        version="counting-v1",
+        mapping={
+            "ramen": [1.0, 0.0, 0.0],
+            'entity.create {"attrs": {"food": "noodle-soup"}, "id": "food:ramen", "type": "food"} manual': [1.0, 0.0, 0.0],
+        },
+    )
+    mem = Engram(user_id="alice", path=str(tmp_path), embedder=embedder)
+    mem.append(
+        "entity.create",
+        {"id": "food:ramen", "type": "food", "attrs": {"food": "noodle-soup"}},
+        observed_at=dt("2026-05-01T10:00:00Z"),
+    )
+    mem.flush("index")
+    embedder.calls.clear()
+
+    first = mem.search("ramen", k=5)
+    second = mem.search("ramen", k=5)
+
+    assert first and second
+    assert embedder.calls == [["ramen"]]
+
+    mem.close()
+
+
+def test_query_embedding_cache_is_separated_by_embedder_version(tmp_path):
+    embedder = CountingEmbedder(
+        version="counting-v1",
+        mapping={
+            "ramen": [1.0, 0.0, 0.0],
+            'entity.create {"attrs": {"food": "noodle-soup"}, "id": "food:ramen", "type": "food"} manual': [1.0, 0.0, 0.0],
+        },
+    )
+    mem = Engram(user_id="alice", path=str(tmp_path), embedder=embedder)
+    mem.append(
+        "entity.create",
+        {"id": "food:ramen", "type": "food", "attrs": {"food": "noodle-soup"}},
+        observed_at=dt("2026-05-01T10:00:00Z"),
+    )
+    mem.flush("index")
+    embedder.calls.clear()
+
+    mem.search("ramen", k=5)
+
+    embedder.version = "counting-v2"
+    mem.flush("index")
+    embedder.calls.clear()
+
+    mem.search("ramen", k=5)
+
+    assert embedder.calls == [["ramen"]]
 
     mem.close()
 

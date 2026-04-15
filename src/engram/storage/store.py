@@ -149,6 +149,10 @@ class EventStore:
             ).fetchone()
         return int(row[0])
 
+    def count_event_search_terms(self) -> int:
+        row = self.conn.execute("SELECT COUNT(*) FROM event_search_terms").fetchone()
+        return int(row[0])
+
     def event_exists(self, event_id: str) -> bool:
         row = self.conn.execute(
             "SELECT 1 FROM events WHERE id = ? LIMIT 1",
@@ -225,6 +229,49 @@ class EventStore:
             """,
             rows,
         )
+
+    def events_missing_search_terms(self) -> list[Event]:
+        rows = self.conn.execute(
+            """
+            SELECT e.*
+            FROM events e
+            LEFT JOIN event_search_terms t ON t.event_id = e.id
+            WHERE t.event_id IS NULL
+            ORDER BY e.seq ASC
+            """
+        ).fetchall()
+        return [self._row_to_event(row) for row in rows]
+
+    def append_event_search_terms(
+        self,
+        tx: sqlite3.Connection,
+        event_id: str,
+        terms: list[str],
+    ) -> None:
+        if not terms:
+            return
+        tx.executemany(
+            """
+            INSERT OR REPLACE INTO event_search_terms(event_id, term)
+            VALUES (?, ?)
+            """,
+            [(event_id, term) for term in terms],
+        )
+
+    def candidate_event_ids_for_search_terms(self, terms: list[str]) -> list[str]:
+        if not terms:
+            return []
+        placeholders = ",".join("?" for _ in terms)
+        rows = self.conn.execute(
+            f"""
+            SELECT DISTINCT event_id
+            FROM event_search_terms
+            WHERE term IN ({placeholders})
+            ORDER BY event_id ASC
+            """,
+            terms,
+        ).fetchall()
+        return [str(row["event_id"]) for row in rows]
 
     def successful_source_turn_ids(self, extractor_version: str) -> set[str]:
         rows = self.conn.execute(
@@ -441,14 +488,26 @@ class EventStore:
         ).fetchall()
         return [self._row_to_event(row) for row in rows]
 
-    def visible_events_known(self, recorded_at: str, from_recorded_at: str | None = None) -> list[Event]:
+    def visible_events_known(
+        self,
+        recorded_at: str,
+        from_recorded_at: str | None = None,
+        event_ids: list[str] | None = None,
+    ) -> list[Event]:
+        event_filter = ""
+        params: list[str] = []
+        if event_ids:
+            placeholders = ",".join("?" for _ in event_ids)
+            event_filter = f" AND events.id IN ({placeholders})"
+            params.extend(event_ids)
         if from_recorded_at is None:
             rows = self.conn.execute(
-                """
+                f"""
                 SELECT events.*
                 FROM events
                 LEFT JOIN extraction_runs r ON r.id = events.extraction_run_id
                 WHERE events.recorded_at <= ?
+                  {event_filter}
                   AND (
                     events.extraction_run_id IS NULL
                     OR (
@@ -459,16 +518,17 @@ class EventStore:
                   )
                 ORDER BY events.recorded_at ASC, events.seq ASC
                 """,
-                (recorded_at, recorded_at, recorded_at),
+                (recorded_at, *params, recorded_at, recorded_at),
             ).fetchall()
         else:
             rows = self.conn.execute(
-                """
+                f"""
                 SELECT events.*
                 FROM events
                 LEFT JOIN extraction_runs r ON r.id = events.extraction_run_id
                 WHERE events.recorded_at >= ?
                   AND events.recorded_at <= ?
+                  {event_filter}
                   AND (
                     events.extraction_run_id IS NULL
                     OR (
@@ -479,13 +539,19 @@ class EventStore:
                   )
                 ORDER BY events.recorded_at ASC, events.seq ASC
                 """,
-                (from_recorded_at, recorded_at, recorded_at, recorded_at),
+                (from_recorded_at, recorded_at, *params, recorded_at, recorded_at),
             ).fetchall()
         return [self._row_to_event(row) for row in rows]
 
-    def visible_events_valid(self) -> list[Event]:
+    def visible_events_valid(self, event_ids: list[str] | None = None) -> list[Event]:
+        event_filter = ""
+        params: list[str] = []
+        if event_ids:
+            placeholders = ",".join("?" for _ in event_ids)
+            event_filter = f" AND events.id IN ({placeholders})"
+            params.extend(event_ids)
         rows = self.conn.execute(
-            """
+            f"""
             SELECT events.*
             FROM events
             LEFT JOIN extraction_runs r ON r.id = events.extraction_run_id
@@ -496,8 +562,10 @@ class EventStore:
                     AND r.superseded_at IS NULL
                 )
             )
+            {event_filter}
             ORDER BY events.recorded_at ASC, events.seq ASC
-            """
+            """,
+            params,
         ).fetchall()
         return [self._row_to_event(row) for row in rows]
 
@@ -822,6 +890,103 @@ class EventStore:
             start_at,
             end_at,
         )
+
+    def filter_relation_events_live_known(self, events: list[Event], recorded_at: str) -> list[Event]:
+        active_cache: dict[str, bool] = {}
+
+        def endpoint_active(candidate_id: str) -> bool:
+            if candidate_id not in active_cache:
+                active_cache[candidate_id] = self._entity_is_known_active_at(candidate_id, recorded_at)
+            return active_cache[candidate_id]
+
+        return [
+            event
+            for event in events
+            if not event.type.startswith("relation.")
+            or (
+                endpoint_active(str(event.data["source"]))
+                and endpoint_active(str(event.data["target"]))
+            )
+        ]
+
+    def filter_relation_events_live_valid_at(self, events: list[Event], at: datetime) -> list[Event]:
+        active_entity_cache: dict[str, bool] = {}
+        active_relation_key_cache: dict[str, set[tuple[str, str, str]]] = {}
+
+        def endpoint_active(candidate_id: str) -> bool:
+            if candidate_id not in active_entity_cache:
+                active_entity_cache[candidate_id] = self._entity_is_valid_active_at(candidate_id, at)
+            return active_entity_cache[candidate_id]
+
+        def active_relation_keys_for_source(source: str) -> set[tuple[str, str, str]]:
+            if source not in active_relation_key_cache:
+                edges = self.fold_relation_edges_valid_at(
+                    source,
+                    at,
+                    events=self.entity_events_valid_visible(source),
+                    endpoint_active=endpoint_active,
+                )
+                active_relation_key_cache[source] = {
+                    (source, edge.other_entity_id, edge.relation_type)
+                    for edge in edges
+                    if edge.direction == "outgoing"
+                }
+            return active_relation_key_cache[source]
+
+        filtered: list[Event] = []
+        for event in events:
+            if not event.type.startswith("relation."):
+                filtered.append(event)
+                continue
+            key = (str(event.data["source"]), str(event.data["target"]), str(event.data["type"]))
+            if key in active_relation_keys_for_source(key[0]):
+                filtered.append(event)
+        return filtered
+
+    def filter_relation_events_live_valid_in_window(
+        self,
+        events: list[Event],
+        start_at: datetime,
+        end_at: datetime,
+    ) -> list[Event]:
+        interval_cache: dict[str, list[tuple[datetime, datetime | None]]] = {}
+        relation_key_cache: dict[str, set[tuple[str, str, str]]] = {}
+
+        def endpoint_active_in_window(
+            overlap_source: str,
+            overlap_target: str,
+            overlap_start: datetime,
+            overlap_end: datetime,
+        ) -> bool:
+            return self._entities_are_valid_together_in_window(
+                overlap_source,
+                overlap_target,
+                overlap_start,
+                overlap_end,
+                interval_cache=interval_cache,
+            )
+
+        def active_relation_keys_for_source(source: str) -> set[tuple[str, str, str]]:
+            if source not in relation_key_cache:
+                relation_key_cache[source] = set(
+                    _relation_window_states(
+                        self.entity_events_valid_visible(source),
+                        start_at,
+                        end_at,
+                        endpoint_active_in_window=endpoint_active_in_window,
+                    ).keys()
+                )
+            return relation_key_cache[source]
+
+        filtered: list[Event] = []
+        for event in events:
+            if not event.type.startswith("relation."):
+                filtered.append(event)
+                continue
+            key = (str(event.data["source"]), str(event.data["target"]), str(event.data["type"]))
+            if key in active_relation_keys_for_source(key[0]):
+                filtered.append(event)
+        return filtered
 
     def _entity_is_known_active_at(self, entity_id: str, recorded_at: str) -> bool:
         return self.fold_entity_events(

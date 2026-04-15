@@ -585,11 +585,18 @@ CREATE TABLE vec_events (
     indexed_at         TEXT NOT NULL,
     PRIMARY KEY(event_id, embedder_version)
 );
+
+CREATE TABLE event_search_terms (
+    event_id           TEXT NOT NULL,
+    term               TEXT NOT NULL,
+    PRIMARY KEY(event_id, term)
+);
 ```
 
 주의:
-- `entity_fts`, `vec_events`는 canonical truth가 아니다.
+- `entity_fts`, `vec_events`, `event_search_terms`는 canonical truth가 아니다.
 - `vec_events`는 embedder version별로 다시 만들 수 있어야 한다.
+- `event_search_terms`는 lexical candidate narrowing용 보조 인덱스다.
 
 ### 6.3 Raw Log 저장 구조
 
@@ -723,7 +730,7 @@ def flush(
 - extractor가 event를 만들면 `extraction_runs`, `events`, `event_entities`, `dirty_ranges`가 함께 커밋된다.
 - 기본 extractor는 no-op이므로 `flush("canonical")`을 호출해도 event 없이 successful extraction run만 남는다.
 - `flush("projection")`은 `dirty_ranges`를 읽어 projector rebuild를 완료할 때까지 수행한다.
-- `flush("index")`는 현재 embedder version 기준으로 아직 인덱싱되지 않은 canonical event를 `vec_events`에 backfill한다.
+- `flush("index")`는 현재 embedder version 기준 `vec_events`와 lexical `event_search_terms`를 함께 최신화한다.
 - embedder version이 바뀌면 이전 vector row는 남겨두고, 검색은 현재 version row만 사용한다.
 - `OpenAIEmbedder`를 쓰더라도 `flush("index")`의 의미는 같다. 달라지는 건 현재 version row의 생성 방식뿐이다.
 - 즉 같은 model/dim이라도 backend identity나 `semantic_space_id`가 달라지면 새 version row를 다시 만들게 된다.
@@ -1097,7 +1104,9 @@ query
 
 현재 구현된 최소형:
 - query token과 event `type/data/reason/source_role`의 lexical match로 seed event를 만든다.
+- lexical path는 먼저 `event_search_terms`로 candidate event id를 좁히고, 그 후보에만 현재 lexical scoring을 적용한다.
 - `flush("index")`로 구축한 `vec_events`를 사용해 current embedder version 기준 semantic cosine score를 계산한다.
+- semantic query embedding은 `(embedder.version, normalized_query)` 기준의 작은 in-memory cache를 사용한다.
 - explicit `caused_by` 링크를 따라 상류 원인과 하류 결과를 1-hop causal expansion 한다.
 - 한국어 query는 조사/어미가 붙은 일부 어절에 대해 간단한 suffix normalization을 적용한다.
 - entity event와 relation event를 모두 seed로 사용하고, `event_entities`를 통해 relation의 source/target까지 entity 후보에 투영한다.
