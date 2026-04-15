@@ -1,41 +1,12 @@
 from __future__ import annotations
 
-import json
 import types
 
 import pytest
 
-import engram.openai_extractor as extractor_module
 from engram import Engram, OpenAIExtractor
 
-from tests.conftest import dt
-
-
-def _install_fake_openai(monkeypatch, responses: list[dict | str], prompts: list[str] | None = None) -> None:
-    class FakeCompletions:
-        def create(self, **kwargs):
-            if prompts is not None:
-                prompts.append(kwargs["messages"][1]["content"])
-            if not responses:
-                raise AssertionError("no fake OpenAI responses left")
-            payload = responses.pop(0)
-            if isinstance(payload, dict) and "_raw_response" in payload:
-                return payload["_raw_response"]
-            content = payload if isinstance(payload, str) else json.dumps(payload, ensure_ascii=False)
-            return types.SimpleNamespace(
-                choices=[
-                    types.SimpleNamespace(
-                        message=types.SimpleNamespace(content=content, refusal=None),
-                        finish_reason="stop",
-                    )
-                ]
-            )
-
-    class FakeOpenAI:
-        def __init__(self, *, api_key=None, base_url=None):
-            self.chat = types.SimpleNamespace(completions=FakeCompletions())
-
-    monkeypatch.setattr(extractor_module, "_load_openai_client_class", lambda: FakeOpenAI)
+from tests.conftest import dt, install_fake_openai as _install_fake_openai
 
 
 def test_turn_flush_canonical_with_openai_extractor_populates_user_memory(tmp_path, monkeypatch):

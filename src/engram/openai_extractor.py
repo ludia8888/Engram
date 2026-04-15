@@ -315,6 +315,12 @@ def _normalize_event_batch(events: list[ExtractedEvent]) -> list[ExtractedEvent]
     relation_update_indexes: dict[tuple[str, str, str], int] = {}
 
     for event in events:
+        if event.type == "entity.create":
+            entity_id = event.data["id"]
+            entity_update_indexes[entity_id] = len(normalized)
+            normalized.append(event)
+            continue
+
         if event.type == "entity.update":
             attrs = dict(event.data["attrs"])
             if not attrs:
@@ -393,7 +399,7 @@ def _normalize_relation_endpoint(raw_id: str, *, safe_user_id: str) -> str:
     slug = _slugify(candidate)
     if not slug:
         raise ValidationError("relation endpoint must not normalize to empty")
-    return f"person:{slug}"
+    return f"entity:{slug}"
 
 
 def _is_self_reference(value: str, *, safe_user_id: str) -> bool:

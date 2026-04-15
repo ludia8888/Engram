@@ -1,17 +1,15 @@
 from __future__ import annotations
 
-import json
 import types
 
 import pytest
 
-import engram.openai_extractor as extractor_module
 import engram.semantic as semantic_module
 from engram.errors import ValidationError
 from engram.openai_extractor import OpenAIExtractor
 from engram.types import QueueItem, RawTurn
 
-from tests.conftest import dt
+from tests.conftest import dt, install_fake_openai as _install_fake_openai
 
 
 def _recent_turns() -> list[RawTurn]:
@@ -36,33 +34,6 @@ def _queue_item() -> QueueItem:
         assistant="알겠어, 기억해둘게.",
         metadata={},
     )
-
-
-def _install_fake_openai(monkeypatch, responses: list[dict | str], requests: list[dict] | None = None) -> None:
-    class FakeCompletions:
-        def create(self, **kwargs):
-            if requests is not None:
-                requests.append(kwargs)
-            if not responses:
-                raise AssertionError("no fake OpenAI responses left")
-            payload = responses.pop(0)
-            if isinstance(payload, dict) and "_raw_response" in payload:
-                return payload["_raw_response"]
-            content = payload if isinstance(payload, str) else json.dumps(payload, ensure_ascii=False)
-            return types.SimpleNamespace(
-                choices=[
-                    types.SimpleNamespace(
-                        message=types.SimpleNamespace(content=content, refusal=None),
-                        finish_reason="stop",
-                    )
-                ]
-            )
-
-    class FakeOpenAI:
-        def __init__(self, *, api_key=None, base_url=None):
-            self.chat = types.SimpleNamespace(completions=FakeCompletions())
-
-    monkeypatch.setattr(extractor_module, "_load_openai_client_class", lambda: FakeOpenAI)
 
 
 def test_openai_extractor_parses_and_normalizes_events(monkeypatch):
@@ -115,22 +86,20 @@ def test_openai_extractor_parses_and_normalizes_events(monkeypatch):
 
     events = extractor.extract(_queue_item())
 
-    assert len(events) == 3
+    assert len(events) == 2
     assert events[0].type == "entity.create"
-    assert events[0].data == {"id": "user:alice", "type": "user", "attrs": {"name": "Alice"}}
-    assert events[1].type == "entity.update"
-    assert events[1].data == {
+    assert events[0].data == {
         "id": "user:alice",
-        "attrs": {"location": "Busan", "diet": "vegetarian"},
+        "type": "user",
+        "attrs": {"name": "Alice", "location": "Busan", "diet": "vegetarian"},
     }
-    assert events[2].type == "relation.create"
-    assert events[2].data == {
+    assert events[1].type == "relation.create"
+    assert events[1].data == {
         "source": "user:alice",
-        "target": "person:bob",
+        "target": "entity:bob",
         "type": "manager",
         "attrs": {"scope": "work"},
     }
-    assert events[1].time_confidence == "unknown"
     assert requests[0]["response_format"] == {"type": "json_object"}
 
 
@@ -257,3 +226,74 @@ def test_openai_extractor_handles_hangul_jamo_slug(monkeypatch):
     events = extractor.extract(_queue_item())
 
     assert events[0].data["id"] == "person:ㄱㅣㅁ-철수"
+
+
+def test_normalize_batch_merges_create_and_subsequent_update(monkeypatch):
+    _install_fake_openai(
+        monkeypatch,
+        [
+            {
+                "events": [
+                    {
+                        "type": "entity.create",
+                        "data": {"id": "self", "type": "user", "attrs": {"name": "Alice"}},
+                        "confidence": 0.9,
+                        "reason": "create",
+                    },
+                    {
+                        "type": "entity.update",
+                        "data": {"id": "self", "attrs": {"location": "Busan"}},
+                        "confidence": 0.95,
+                        "reason": "update after create",
+                    },
+                ]
+            }
+        ],
+    )
+    extractor = OpenAIExtractor()
+    extractor.bind_runtime_context(
+        safe_user_id="alice",
+        recent_turns_provider=lambda item, limit: [],
+    )
+
+    events = extractor.extract(_queue_item())
+
+    assert len(events) == 1
+    assert events[0].type == "entity.create"
+    assert events[0].data["attrs"] == {"name": "Alice", "location": "Busan"}
+    assert events[0].confidence == 0.95
+
+
+def test_normalize_batch_does_not_merge_create_and_delete(monkeypatch):
+    _install_fake_openai(
+        monkeypatch,
+        [
+            {
+                "events": [
+                    {
+                        "type": "entity.create",
+                        "data": {"id": "self", "type": "user", "attrs": {"name": "Alice"}},
+                        "confidence": 0.9,
+                        "reason": "create",
+                    },
+                    {
+                        "type": "entity.delete",
+                        "data": {"id": "self"},
+                        "confidence": 0.8,
+                        "reason": "delete after create",
+                    },
+                ]
+            }
+        ],
+    )
+    extractor = OpenAIExtractor()
+    extractor.bind_runtime_context(
+        safe_user_id="alice",
+        recent_turns_provider=lambda item, limit: [],
+    )
+
+    events = extractor.extract(_queue_item())
+
+    assert len(events) == 2
+    assert events[0].type == "entity.create"
+    assert events[1].type == "entity.delete"
