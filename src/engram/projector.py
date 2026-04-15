@@ -42,6 +42,10 @@ class Projector:
 
     def rebuild_dirty(self) -> int:
         owners = self.store.dirty_owner_ids()
+        return self.rebuild_owners(owners)
+
+    def rebuild_owners(self, owner_ids: list[str]) -> int:
+        owners = sorted(set(owner_ids))
         if not owners:
             return 0
 
@@ -57,17 +61,11 @@ class Projector:
         self._relation_snapshot = MappingProxyType(new_relation_snapshot)
         return len(owners)
 
-    def rebuild_owner(self, owner_id: str) -> bool:
-        new_snapshot = dict(self._snapshot)
-        new_relation_snapshot = dict(self._relation_snapshot)
-        self._apply_owner_materialization(owner_id, new_snapshot, new_relation_snapshot)
-
-        with self.store.transaction() as tx:
-            self.store.clear_dirty_ranges_for_owners(tx, [owner_id])
-
-        self._snapshot = MappingProxyType(new_snapshot)
-        self._relation_snapshot = MappingProxyType(new_relation_snapshot)
-        return True
+    def rebuild_owner(self, owner_id: str, *, related_owner_ids: list[str] | None = None) -> int:
+        owners = [owner_id]
+        if related_owner_ids:
+            owners.extend(related_owner_ids)
+        return self.rebuild_owners(owners)
 
     def rebuild_dirty_until_stable(self) -> int:
         rebuilt_total = 0

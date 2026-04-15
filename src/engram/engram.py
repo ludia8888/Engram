@@ -343,8 +343,17 @@ class Engram:
                 scope: Literal["dirty", "owner", "full"] = "dirty"
                 target_owner_id = None
             else:
-                self.projector.rebuild_owner(owner_id)
-                rebuilt_owner_count = 1
+                current_relation_neighbors = [
+                    edge.other_entity_id
+                    for edge in self.projector.current_relation_snapshot().get(owner_id, ())
+                ]
+                canonical_relation_neighbors = [
+                    edge.other_entity_id for edge in self.store.materialize_current_relations(owner_id)
+                ]
+                rebuilt_owner_count = self.projector.rebuild_owner(
+                    owner_id,
+                    related_owner_ids=current_relation_neighbors + canonical_relation_neighbors,
+                )
                 scope = "owner"
                 target_owner_id = owner_id
         elif mode == "full":

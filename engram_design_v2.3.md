@@ -866,7 +866,8 @@ def rebuild_projection(
 - supersede는 `extraction_runs.superseded_at`와 `superseded_runs` 둘 다에 기록된다.
 - reprocess는 canonical store와 lineage만 갱신하고, projection 반영은 `flush("projection")`이 맡는다.
 - `rebuild_projection(mode="dirty")`는 현재 dirty owner들을 dirty가 빌 때까지 반복 rebuild한다.
-- `rebuild_projection(mode="dirty", owner_id="...")`는 dirty row가 없어도 그 owner 하나를 canonical 기준으로 강제 rebuild한다.
+- `rebuild_projection(mode="dirty", owner_id="...")`는 dirty row가 없어도 그 owner를 canonical 기준으로 강제 rebuild한다.
+- 같은 호출에서 relation adjacency 일관성을 위해, target owner와 직접 연결된 current/canonical relation neighbor owner도 함께 rebuild할 수 있다.
 - `rebuild_projection(mode="full")`는 snapshot 전체를 canonical 기준으로 다시 만들고 dirty ranges를 모두 비운다.
 - `rebuild_projection(mode="full", owner_id="...")`는 허용하지 않는다.
 - `flush("projection")`는 내부적으로 `rebuild_projection(mode="dirty")`와 같은 rebuild 경로를 사용한다.

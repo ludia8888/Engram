@@ -93,11 +93,12 @@ def test_rebuild_projection_owner_refreshes_stale_snapshot_without_dirty_rows(tm
 
     assert result.scope == "owner"
     assert result.target_owner_id == "user:alice"
-    assert result.rebuilt_owner_count == 1
+    assert result.rebuilt_owner_count == 2
     assert result.dirty_owner_count_before == 0
     assert result.dirty_owner_count_after == 0
     assert "user:alice" not in mem.projector.current_snapshot()
     assert "user:alice" not in mem.projector.current_relation_snapshot()
+    assert "user:bob" not in mem.projector.current_relation_snapshot()
 
     mem.close()
 
@@ -116,18 +117,26 @@ def test_rebuild_projection_owner_only_clears_target_owner_dirty_rows(tmp_path):
         source_role="manual",
         time_confidence="exact",
     )
+    mem.append(
+        "entity.create",
+        {"id": "user:charlie", "type": "user", "attrs": {"name": "Charlie"}},
+        observed_at=dt("2026-05-02T11:00:00Z"),
+        source_role="manual",
+    )
 
     before_dirty = set(mem.store.dirty_owner_ids())
     result = mem.rebuild_projection(owner_id="user:alice")
     after_dirty = set(mem.store.dirty_owner_ids())
 
-    assert before_dirty == {"user:alice", "user:bob"}
+    assert before_dirty == {"user:alice", "user:bob", "user:charlie"}
     assert result.scope == "owner"
-    assert result.dirty_owner_count_before == 2
+    assert result.rebuilt_owner_count == 2
+    assert result.dirty_owner_count_before == 3
     assert result.dirty_owner_count_after == 1
-    assert after_dirty == {"user:bob"}
+    assert after_dirty == {"user:charlie"}
     assert "user:alice" not in mem.projector.current_snapshot()
     assert "user:alice" not in mem.projector.current_relation_snapshot()
+    assert "user:bob" not in mem.projector.current_relation_snapshot()
 
     mem.close()
 

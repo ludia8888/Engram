@@ -366,7 +366,7 @@ def test_rebuild_dirty_retracts_deleted_relation_from_relation_snapshot(tmp_path
     assert "user:bob" not in projector.current_relation_snapshot()
 
 
-def test_rebuild_owner_retracts_single_owner_and_keeps_other_dirty_rows(tmp_path):
+def test_rebuild_owner_retracts_owner_and_related_neighbors_only(tmp_path):
     conn = open_connection(tmp_path / "engram.db")
     store = EventStore(conn)
     projector = Projector(store)
@@ -423,15 +423,28 @@ def test_rebuild_owner_retracts_single_owner_and_keeps_other_dirty_rows(tmp_path
         store.append_event(tx, bob_update)
         store.append_event_entities(tx, bob_update.id, [("user:bob", "subject")])
         _mark_dirty(store, tx, bob_update)
+        charlie = _event(
+            str(uuid4()),
+            store.next_seq(tx),
+            "entity.create",
+            {"id": "user:charlie", "type": "user", "attrs": {"name": "Charlie"}},
+        )
+        store.append_event(tx, charlie)
+        store.append_event_entities(tx, charlie.id, [("user:charlie", "subject")])
+        _mark_dirty(store, tx, charlie)
 
-    assert set(store.dirty_owner_ids()) == {"user:alice", "user:bob"}
+    assert set(store.dirty_owner_ids()) == {"user:alice", "user:bob", "user:charlie"}
 
-    rebuilt = projector.rebuild_owner("user:alice")
+    rebuilt = projector.rebuild_owner(
+        "user:alice",
+        related_owner_ids=["user:bob"],
+    )
 
-    assert rebuilt is True
+    assert rebuilt == 2
     assert "user:alice" not in projector.current_snapshot()
     assert "user:alice" not in projector.current_relation_snapshot()
-    assert set(store.dirty_owner_ids()) == {"user:bob"}
+    assert "user:bob" not in projector.current_relation_snapshot()
+    assert set(store.dirty_owner_ids()) == {"user:charlie"}
 
 
 def test_rebuild_dirty_until_stable_raises_when_no_progress_is_possible(tmp_path, monkeypatch):
