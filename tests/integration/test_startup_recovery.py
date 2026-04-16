@@ -164,3 +164,32 @@ def test_startup_failure_releases_writer_lock_and_allows_retry(tmp_path):
     retry = Engram(user_id="alice", path=str(tmp_path), queue_max_size=4, queue_put_timeout=0.001)
     assert retry.queue.qsize() == 2
     retry.close()
+
+
+def test_startup_loads_snapshot_then_rebuilds_delta(tmp_path):
+    first = Engram(user_id="alice", path=str(tmp_path))
+    first.append(
+        "entity.create",
+        {"id": "user:alice", "type": "user", "attrs": {"diet": "vegetarian"}},
+        observed_at=dt("2026-05-01T10:00:00Z"),
+    )
+    first.flush("all")
+
+    snapshot = first.projector.current_snapshot()
+    assert "user:alice" in snapshot
+
+    first.append(
+        "entity.update",
+        {"id": "user:alice", "attrs": {"location": "Busan"}},
+        observed_at=dt("2026-05-01T11:00:00Z"),
+    )
+    first.close()
+
+    second = Engram(user_id="alice", path=str(tmp_path))
+
+    snapshot = second.projector.current_snapshot()
+    assert "user:alice" in snapshot
+    assert snapshot["user:alice"].attrs == {"diet": "vegetarian", "location": "Busan"}
+    assert second.store.count_dirty_ranges() == 0
+
+    second.close()

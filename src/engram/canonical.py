@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Protocol
 from uuid import uuid4
 
 from .errors import ValidationError
+from .retry import RetryPolicy, RetryState
 from .event_ops import (
     derive_cascade_dirty_rows_for_entity_event,
     derive_dirty_rows,
@@ -135,6 +137,31 @@ class CanonicalWorker:
             self._record_failed_run(item, processed_at, str(exc))
             raise
         return True
+
+    def process_with_retry(
+        self,
+        item: QueueItem,
+        policy: RetryPolicy,
+    ) -> tuple[bool, RetryState | None]:
+        logger = logging.getLogger(__name__)
+        prior_failures = self.store.count_failed_runs_for_turn(
+            item.turn_id, self.extractor.version,
+        )
+        if prior_failures >= policy.max_retries:
+            logger.error("permanently failed turn %s after %d prior attempts", item.turn_id, prior_failures)
+            return False, None
+        try:
+            success = self.process(item)
+            return success, None
+        except Exception as exc:
+            attempt = prior_failures + 1
+            if attempt >= policy.max_retries:
+                logger.error("permanently failed turn %s after %d attempts: %s", item.turn_id, attempt, exc)
+                return False, None
+            state = RetryState(turn_id=item.turn_id, attempt=attempt, last_error=str(exc))
+            state.schedule_next(policy)
+            logger.warning("retrying turn %s (attempt %d/%d): %s", item.turn_id, attempt, policy.max_retries, exc)
+            return False, state
 
     def _record_failed_run(self, item: QueueItem, processed_at, error: str) -> None:
         run = ExtractionRun(

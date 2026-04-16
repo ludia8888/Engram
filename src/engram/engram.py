@@ -49,7 +49,10 @@ class Engram:
         queue_put_timeout: float = 1.0,
         extractor: Extractor | None = None,
         embedder: Embedder | None = None,
+        auto_flush: bool = False,
     ):
+        from .retry import RetryPolicy
+
         base_root = Path(path) if path else Path.home() / ".engram" / "users"
         self.user_id = user_id
         self.safe_user_id = _safe_user_id(user_id)
@@ -63,6 +66,7 @@ class Engram:
 
         self._writer_lock = WriterLock(self.root / ".writer.lock")
         self.conn = None
+        self._background_worker = None
         self._writer_lock.acquire()
         try:
             self.conn = open_connection(self.db_path)
@@ -84,7 +88,21 @@ class Engram:
                 extractor_version=self.extractor.version,
             )
             self.recovery.catch_up_on_startup()
+            if auto_flush:
+                from .background import BackgroundWorker
+
+                self._background_worker = BackgroundWorker(
+                    work_queue=self.queue,
+                    canonical_worker=self.canonical_worker,
+                    projector=self.projector,
+                    semantic_indexer=self.semantic_indexer,
+                    retry_policy=RetryPolicy(),
+                )
+                self._background_worker.start()
         except BaseException:
+            if self._background_worker is not None:
+                self._background_worker.stop()
+                self._background_worker = None
             if self.conn is not None:
                 self.conn.close()
                 self.conn = None
@@ -93,6 +111,9 @@ class Engram:
 
     def close(self) -> None:
         try:
+            if self._background_worker is not None:
+                self._background_worker.stop()
+                self._background_worker = None
             if self.conn is not None:
                 self.conn.close()
                 self.conn = None
@@ -123,6 +144,8 @@ class Engram:
             self.queue.put(item, timeout=self.queue_put_timeout)
         except queue.Full:
             return TurnAck(turn_id=ack.turn_id, observed_at=ack.observed_at, durable_at=ack.durable_at, queued=False)
+        if self._background_worker is not None:
+            self._background_worker.notify()
         return ack
 
     def append(
@@ -575,7 +598,7 @@ class Engram:
 
     def flush(
         self,
-        level: Literal["raw", "canonical", "projection", "index", "all"] = "projection",
+        level: Literal["raw", "canonical", "projection", "snapshot", "index", "all"] = "projection",
     ) -> None:
         if level == "raw":
             return
@@ -591,11 +614,14 @@ class Engram:
                     self.queue.task_done()
         elif level == "projection":
             self.rebuild_projection(mode="dirty")
+        elif level == "snapshot":
+            self.projector.save_snapshot()
         elif level == "index":
             self.semantic_indexer.index_missing()
         elif level == "all":
             self.flush("canonical")
             self.flush("projection")
+            self.flush("snapshot")
             self.flush("index")
         else:
             raise ValidationError(f"unsupported flush level: {level}")

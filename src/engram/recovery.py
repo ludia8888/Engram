@@ -27,6 +27,8 @@ class RecoveryService:
         self.extractor_version = extractor_version
 
     def catch_up_on_startup(self) -> int:
+        self.projector.load_snapshot()
+
         while self.store.count_dirty_ranges() > 0:
             rebuilt = self.projector.rebuild_dirty()
             if rebuilt == 0 and self.store.count_dirty_ranges() > 0:
