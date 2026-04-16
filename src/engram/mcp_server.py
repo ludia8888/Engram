@@ -53,6 +53,7 @@ def _entity_to_dict(entity) -> dict:
         "attrs": entity.attrs,
         "created_recorded_at": to_rfc3339(entity.created_recorded_at),
         "updated_recorded_at": to_rfc3339(entity.updated_recorded_at),
+        "redirected_from": list(entity.redirected_from),
     }
 
 
@@ -273,6 +274,46 @@ def _tool_flush(level: str = "all") -> str:
     return json.dumps({"status": "ok", "level": level})
 
 
+def _tool_merge_entities(source_id: str, target_id: str, reason: str | None = None) -> str:
+    """Logically merge a duplicate entity into a canonical target.
+
+    Args:
+        source_id: Duplicate or weaker entity ID
+        target_id: Canonical entity ID to keep
+        reason: Optional merge reason
+    """
+    mem = _get_engram()
+    merged_to = mem.merge_entities(source_id, target_id, reason=reason)
+    return json.dumps({"merged_to": merged_to})
+
+
+def _tool_list_duplicates(
+    entity_id: str | None = None,
+    status: str | None = "OPEN",
+    limit: int = 100,
+) -> str:
+    """List duplicate entity candidates discovered by the data quality layer."""
+    mem = _get_engram()
+    rows = mem.list_duplicate_candidates(entity_id=entity_id, status=status, limit=limit)
+    return json.dumps(
+        [
+            {
+                "id": row.id,
+                "entity_id": row.entity_id,
+                "candidate_entity_id": row.candidate_entity_id,
+                "match_basis": row.match_basis,
+                "score": row.score,
+                "status": row.status,
+                "reason": row.reason,
+                "observed_at": to_rfc3339(row.observed_at),
+                "source_turn_id": row.source_turn_id,
+                "event_type": row.event_type,
+            }
+            for row in rows
+        ]
+    )
+
+
 # ---------------------------------------------------------------------------
 # Tool registration
 # ---------------------------------------------------------------------------
@@ -286,6 +327,8 @@ _TOOLS = [
     ("engram_get_relations", _tool_get_relations),
     ("engram_history", _tool_history),
     ("engram_flush", _tool_flush),
+    ("engram_merge_entities", _tool_merge_entities),
+    ("engram_list_duplicates", _tool_list_duplicates),
 ]
 
 

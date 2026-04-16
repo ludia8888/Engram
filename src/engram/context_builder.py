@@ -25,6 +25,7 @@ class ContextBuilder:
         include_raw: bool,
         views_by_entity: dict[str, TemporalEntityView | None],
         relations_by_entity: dict[str, list[RelationEdge]],
+        duplicate_hints_by_entity: dict[str, list[str]],
     ) -> str:
         return self._build(
             mode="known",
@@ -37,6 +38,7 @@ class ContextBuilder:
             include_raw=include_raw,
             views_by_entity=views_by_entity,
             relations_by_entity=relations_by_entity,
+            duplicate_hints_by_entity=duplicate_hints_by_entity,
         )
 
     def build_valid(
@@ -51,6 +53,7 @@ class ContextBuilder:
         include_raw: bool,
         views_by_entity: dict[str, TemporalEntityView | None],
         relations_by_entity: dict[str, list[RelationEdge]],
+        duplicate_hints_by_entity: dict[str, list[str]],
     ) -> str:
         return self._build(
             mode="valid",
@@ -63,6 +66,7 @@ class ContextBuilder:
             include_raw=include_raw,
             views_by_entity=views_by_entity,
             relations_by_entity=relations_by_entity,
+            duplicate_hints_by_entity=duplicate_hints_by_entity,
         )
 
     def _build(
@@ -78,6 +82,7 @@ class ContextBuilder:
         include_raw: bool,
         views_by_entity: dict[str, TemporalEntityView | None],
         relations_by_entity: dict[str, list[RelationEdge]],
+        duplicate_hints_by_entity: dict[str, list[str]],
     ) -> str:
         basis_time = as_of or utcnow()
         supporting_events = self.store.events_by_ids(_supporting_event_ids(results))
@@ -122,6 +127,13 @@ class ContextBuilder:
             current_state.append(line)
         if len(current_state) > 1:
             sections.append(current_state)
+
+        duplicate_lines = ["## Duplicate Hints"]
+        for result in results:
+            for hint in duplicate_hints_by_entity.get(result.entity_id, []):
+                duplicate_lines.append(f"- {hint}")
+        if len(duplicate_lines) > 1:
+            sections.append(duplicate_lines)
 
         if include_history:
             change_lines = ["## Relevant Changes"]

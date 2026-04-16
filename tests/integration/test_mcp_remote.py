@@ -15,6 +15,8 @@ def test_build_mcp_server_registers_all_tools():
         "engram_get",
         "engram_get_relations",
         "engram_history",
+        "engram_list_duplicates",
+        "engram_merge_entities",
         "engram_recall",
         "engram_search",
         "engram_turn",
@@ -25,7 +27,7 @@ def test_build_mcp_server_with_custom_host_port():
     server = build_mcp_server(host="0.0.0.0", port=9090)
     assert server.settings.host == "0.0.0.0"
     assert server.settings.port == 9090
-    assert len(server._tool_manager._tools) == 8
+    assert len(server._tool_manager._tools) == 10
 
 
 def test_build_mcp_server_default_host_port():
@@ -77,5 +79,5 @@ def test_multiple_servers_are_independent():
     assert server_a is not server_b
     assert server_a.settings.port == 8001
     assert server_b.settings.port == 8002
-    assert len(server_a._tool_manager._tools) == 8
-    assert len(server_b._tool_manager._tools) == 8
+    assert len(server_a._tool_manager._tools) == 10
+    assert len(server_b._tool_manager._tools) == 10

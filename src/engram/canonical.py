@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Protocol
 from uuid import uuid4
 
+from .data_quality import DataQualityManager
 from .errors import ValidationError
 from .retry import RetryPolicy, RetryState
 from .event_ops import (
@@ -34,9 +35,10 @@ class NullExtractor:
 
 
 class CanonicalWorker:
-    def __init__(self, store: EventStore, extractor: Extractor):
+    def __init__(self, store: EventStore, extractor: Extractor, data_quality: DataQualityManager):
         self.store = store
         self.extractor = extractor
+        self.data_quality = data_quality
 
     def process(self, item: QueueItem, *, force: bool = False) -> bool:
         if not force and self.store.has_successful_extraction_run(item.turn_id, self.extractor.version):
@@ -45,6 +47,12 @@ class CanonicalWorker:
         processed_at = utcnow()
         try:
             drafts = self.extractor.extract(item)
+            quality_batch = self.data_quality.process_drafts(
+                drafts,
+                observed_at=item.observed_at,
+                source_turn_id=item.turn_id,
+            )
+            drafts = quality_batch.drafts
         except Exception as exc:
             self._record_failed_run(item, processed_at, str(exc))
             raise
@@ -122,6 +130,23 @@ class CanonicalWorker:
                             else [],
                         )
                     )
+                if quality_batch.aliases:
+                    self.store.append_entity_alias_rows(
+                        tx,
+                        [
+                            (
+                                entity_id,
+                                entity_type,
+                                alias,
+                                normalized_alias,
+                                alias_kind,
+                                processed_at,
+                            )
+                            for entity_id, entity_type, alias, normalized_alias, alias_kind in quality_batch.aliases
+                        ],
+                    )
+                if quality_batch.duplicate_candidates:
+                    self.store.append_duplicate_candidates(tx, quality_batch.duplicate_candidates)
 
                 if superseded_run_ids:
                     dirty_rows.extend(

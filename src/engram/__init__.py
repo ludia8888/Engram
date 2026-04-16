@@ -4,9 +4,12 @@ from .errors import EngramError, QueueFullError, ValidationError, WriterLockErro
 from .meaning_index import MeaningAnalyzer, NullMeaningAnalyzer
 from .openai_extractor import OpenAIExtractor
 from .openai_meaning_analyzer import OpenAIMeaningAnalyzer
+from .schema_registry import EntitySchema, RelationSchema, SchemaRegistry
 from .semantic import Embedder, HashEmbedder, OpenAIEmbedder
 from .types import (
+    DuplicateCandidate,
     Entity,
+    EntityAlias,
     Event,
     ExtractedEvent,
     ExtractionRun,
@@ -28,6 +31,9 @@ __all__ = [
     "MeaningAnalyzer",
     "NullMeaningAnalyzer",
     "OpenAIMeaningAnalyzer",
+    "SchemaRegistry",
+    "EntitySchema",
+    "RelationSchema",
     "Embedder",
     "HashEmbedder",
     "OpenAIEmbedder",
@@ -36,7 +42,9 @@ __all__ = [
     "QueueFullError",
     "ValidationError",
     "WriterLockError",
+    "DuplicateCandidate",
     "Entity",
+    "EntityAlias",
     "Event",
     "ExtractedEvent",
     "ExtractionRun",

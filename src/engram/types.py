@@ -10,6 +10,7 @@ TimeConfidence = Literal["exact", "inferred", "unknown"]
 ExtractionRunStatus = Literal["SUCCEEDED", "FAILED", "SKIPPED"]
 RelationDirection = Literal["outgoing", "incoming"]
 MeaningUnitKind = Literal["protected_phrase", "alias", "canonical_key", "facet", "fallback_term"]
+DuplicateCandidateStatus = Literal["OPEN", "MERGED", "DISMISSED"]
 
 
 @dataclass(slots=True)
@@ -127,6 +128,7 @@ class Entity:
     attrs: dict[str, Any]
     created_recorded_at: datetime
     updated_recorded_at: datetime
+    redirected_from: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -221,3 +223,27 @@ class MeaningAnalysisRun:
     status: ExtractionRunStatus
     error: str | None
     unit_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class EntityAlias:
+    entity_id: str
+    entity_type: str
+    alias: str
+    normalized_alias: str
+    alias_kind: Literal["name", "alias", "canonical_key", "id"]
+    created_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class DuplicateCandidate:
+    id: str
+    entity_id: str
+    candidate_entity_id: str
+    match_basis: str
+    score: float
+    status: DuplicateCandidateStatus
+    reason: str | None
+    observed_at: datetime
+    source_turn_id: str | None
+    event_type: str

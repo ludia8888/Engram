@@ -9,6 +9,7 @@ from engram.time_utils import from_rfc3339
 from .models import (
     AppendRequest,
     AppendResponse,
+    DuplicateCandidateResponse,
     EntityResponse,
     FlushRequest,
     HealthResponse,
@@ -16,6 +17,8 @@ from .models import (
     ProjectionRebuildResultResponse,
     RawTurnResponse,
     RebuildProjectionRequest,
+    MergeEntitiesRequest,
+    MergeEntitiesResponse,
     RelationEdgeResponse,
     RelationHistoryEntryResponse,
     ReprocessRequest,
@@ -94,6 +97,25 @@ def append_event(request: Request, body: AppendRequest) -> AppendResponse:
         time_confidence=body.time_confidence,
     )
     return AppendResponse(event_id=event_id)
+
+
+@router.post("/entities/merge")
+def merge_entities(request: Request, body: MergeEntitiesRequest) -> MergeEntitiesResponse:
+    mem = _engram(request)
+    merged_to = mem.merge_entities(body.source_id, body.target_id, reason=body.reason)
+    return MergeEntitiesResponse(merged_to=merged_to)
+
+
+@router.get("/duplicates")
+def list_duplicates(
+    request: Request,
+    entity_id: str | None = None,
+    status: str | None = "OPEN",
+    limit: int = Query(default=100, ge=1, le=500),
+) -> list[DuplicateCandidateResponse]:
+    mem = _engram(request)
+    rows = mem.list_duplicate_candidates(entity_id=entity_id, status=status, limit=limit)
+    return [DuplicateCandidateResponse.model_validate(row) for row in rows]
 
 
 @router.get("/entity/{entity_id:path}/known-at")

@@ -51,6 +51,7 @@ class EntityResponse(BaseModel):
     attrs: dict[str, Any]
     created_recorded_at: RFC3339DateTime
     updated_recorded_at: RFC3339DateTime
+    redirected_from: list[str] = Field(default_factory=list)
 
 
 class TemporalEntityViewResponse(BaseModel):
@@ -116,6 +117,30 @@ class RawTurnResponse(BaseModel):
 
 class AppendResponse(BaseModel):
     event_id: str
+
+
+class MergeEntitiesRequest(BaseModel):
+    source_id: str
+    target_id: str
+    reason: str | None = None
+
+
+class MergeEntitiesResponse(BaseModel):
+    merged_to: str
+
+
+class DuplicateCandidateResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: str
+    entity_id: str
+    candidate_entity_id: str
+    match_basis: str
+    score: float
+    status: str
+    reason: str | None
+    observed_at: RFC3339DateTime
+    source_turn_id: str | None
+    event_type: str
 
 
 class RelationHistoryEntryResponse(BaseModel):

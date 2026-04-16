@@ -59,6 +59,7 @@ def cmd_get(args) -> None:
         "attrs": entity.attrs,
         "created_recorded_at": to_rfc3339(entity.created_recorded_at),
         "updated_recorded_at": to_rfc3339(entity.updated_recorded_at),
+        "redirected_from": entity.redirected_from,
     }, ensure_ascii=False, indent=2))
     mem.close()
 
@@ -114,6 +115,40 @@ def cmd_flush(args) -> None:
     mem.close()
 
 
+def cmd_merge(args) -> None:
+    mem = _build_engram(args)
+    merged_to = mem.merge_entities(args.source_id, args.target_id, reason=args.reason)
+    print(json.dumps({"merged_to": merged_to}, ensure_ascii=False, indent=2))
+    mem.close()
+
+
+def cmd_duplicates(args) -> None:
+    mem = _build_engram(args)
+    rows = mem.list_duplicate_candidates(entity_id=args.entity_id, status=args.status, limit=args.limit)
+    print(
+        json.dumps(
+            [
+                {
+                    "id": row.id,
+                    "entity_id": row.entity_id,
+                    "candidate_entity_id": row.candidate_entity_id,
+                    "match_basis": row.match_basis,
+                    "score": row.score,
+                    "status": row.status,
+                    "reason": row.reason,
+                    "observed_at": to_rfc3339(row.observed_at),
+                    "source_turn_id": row.source_turn_id,
+                    "event_type": row.event_type,
+                }
+                for row in rows
+            ],
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+    mem.close()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="engram", description="Engram memory engine CLI")
     parser.add_argument("--user-id", default=os.environ.get("ENGRAM_USER_ID", "default"))
@@ -157,6 +192,18 @@ def main() -> None:
     p_flush.add_argument("level", nargs="?", default="all",
                          choices=["raw", "canonical", "projection", "snapshot", "index", "all"])
     p_flush.set_defaults(func=cmd_flush)
+
+    p_merge = sub.add_parser("merge", help="Merge duplicate entities")
+    p_merge.add_argument("source_id")
+    p_merge.add_argument("target_id")
+    p_merge.add_argument("--reason", default=None)
+    p_merge.set_defaults(func=cmd_merge)
+
+    p_duplicates = sub.add_parser("duplicates", help="List duplicate entity candidates")
+    p_duplicates.add_argument("--entity-id", default=None)
+    p_duplicates.add_argument("--status", default="OPEN")
+    p_duplicates.add_argument("--limit", type=int, default=100)
+    p_duplicates.set_defaults(func=cmd_duplicates)
 
     args = parser.parse_args()
     args.func(args)

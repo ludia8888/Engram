@@ -9,6 +9,7 @@ from typing import Any, Callable
 
 from .errors import ValidationError
 from .event_ops import validate_event
+from .schema_registry import SchemaRegistry
 from .semantic import _default_openai_space_id, _load_openai_client_class
 from .time_utils import from_rfc3339
 from .types import ExtractedEvent, QueueItem, RawTurn
@@ -41,6 +42,16 @@ class OpenAIExtractor:
         default=None,
         repr=False,
     )
+    _entity_shortlist_provider: Callable[[QueueItem, int], list[dict[str, Any]]] | None = field(
+        init=False,
+        default=None,
+        repr=False,
+    )
+    _schema_registry: SchemaRegistry | None = field(
+        init=False,
+        default=None,
+        repr=False,
+    )
 
     def __post_init__(self) -> None:
         self._space_id = _default_openai_space_id(self.base_url)
@@ -54,17 +65,28 @@ class OpenAIExtractor:
         *,
         safe_user_id: str,
         recent_turns_provider: Callable[[QueueItem, int], list[RawTurn]],
+        schema_registry: SchemaRegistry | None = None,
+        entity_shortlist_provider: Callable[[QueueItem, int], list[dict[str, Any]]] | None = None,
     ) -> None:
         self._safe_user_id = safe_user_id
         self._recent_turns_provider = recent_turns_provider
+        self._schema_registry = schema_registry or SchemaRegistry.default()
+        self._entity_shortlist_provider = entity_shortlist_provider or (lambda _item, _limit: [])
 
     def extract(self, item: QueueItem) -> list[ExtractedEvent]:
-        if self._safe_user_id is None or self._recent_turns_provider is None:
+        if (
+            self._safe_user_id is None
+            or self._recent_turns_provider is None
+            or self._schema_registry is None
+            or self._entity_shortlist_provider is None
+        ):
             raise RuntimeError("OpenAIExtractor must be bound to Engram runtime context before use")
 
         prompt = self._build_prompt(
             item=item,
             recent_turns=self._recent_turns_provider(item, 4),
+            entity_shortlist=self._entity_shortlist_provider(item, 8),
+            schema_summary=self._schema_registry.summarize_for_extractor(),
             safe_user_id=self._safe_user_id,
         )
         response = self._client_instance().chat.completions.create(
@@ -85,6 +107,8 @@ class OpenAIExtractor:
         *,
         item: QueueItem,
         recent_turns: list[RawTurn],
+        entity_shortlist: list[dict[str, Any]],
+        schema_summary: dict[str, Any],
         safe_user_id: str,
     ) -> str:
         payload = {
@@ -102,8 +126,12 @@ class OpenAIExtractor:
                 "self_reference_marker": "self",
                 "self_entity_id": f"user:{safe_user_id}",
                 "other_people": "person:<slug>",
-                "non_people_entities": "entity:<slug>",
+                "projects": "project:<slug>",
+                "tools": "tool:<slug>",
+                "locations": "location:<slug>",
+                "fallback_non_people_entities": "entity:<slug>",
             },
+            "schema_registry": schema_summary,
             "allowed_event_types": {
                 "entity.create": {"data": {"id": "string", "type": "string", "attrs": "object"}},
                 "entity.update": {"data": {"id": "string", "attrs": "object"}},
@@ -147,6 +175,7 @@ class OpenAIExtractor:
                 }
                 for turn in recent_turns
             ],
+            "existing_entity_shortlist": entity_shortlist,
         }
         return json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
 
@@ -429,9 +458,8 @@ def _normalize_entity_id(
     slug = _slugify(candidate)
     if not slug:
         raise ValidationError("entity id must not normalize to empty")
-    if entity_type in {"user", "person"}:
-        return f"person:{slug}", False
-    return f"entity:{slug}", False
+    prefix = _entity_prefix_for_type(entity_type)
+    return f"{prefix}:{slug}", False
 
 
 def _normalize_relation_endpoint(raw_id: str, *, safe_user_id: str, entity_id_map: dict[str, str] | None = None) -> str:
@@ -448,6 +476,14 @@ def _normalize_relation_endpoint(raw_id: str, *, safe_user_id: str, entity_id_ma
     if entity_id_map and slug in entity_id_map:
         return entity_id_map[slug]
     return f"entity:{slug}"
+
+
+def _entity_prefix_for_type(entity_type: str | None) -> str:
+    if entity_type in {"user", "person"}:
+        return "person"
+    if entity_type in {"project", "tool", "location"}:
+        return entity_type
+    return "entity"
 
 
 def _is_self_reference(value: str, *, safe_user_id: str) -> bool:
@@ -541,10 +577,7 @@ def _build_entity_id_map(raw_events: list, *, safe_user_id: str) -> dict[str, st
             continue
         entity_type = data.get("type")
         entity_type_str = entity_type.strip().lower() if isinstance(entity_type, str) else None
-        if entity_type_str in {"user", "person"}:
-            mapping[slug] = f"person:{slug}"
-        else:
-            mapping[slug] = f"entity:{slug}"
+        mapping[slug] = f"{_entity_prefix_for_type(entity_type_str)}:{slug}"
     return mapping
 
 

@@ -282,9 +282,16 @@ class RetrievalEngine:
                 entity_scores[entity_id] += scored.combined_score
                 entity_event_scores[entity_id].append(scored)
 
-        results: list[SearchResult] = []
+        collapsed_scores: dict[str, float] = defaultdict(float)
+        collapsed_events: dict[str, list[ScoredEvent]] = defaultdict(list)
         for entity_id, total_score in entity_scores.items():
-            ranked_events = sorted(entity_event_scores[entity_id], key=sort_key)
+            display_entity_id = self._display_entity_id(entity_id)
+            collapsed_scores[display_entity_id] += total_score
+            collapsed_events[display_entity_id].extend(entity_event_scores[entity_id])
+
+        results: list[SearchResult] = []
+        for entity_id, total_score in collapsed_scores.items():
+            ranked_events = sorted(collapsed_events[entity_id], key=sort_key)
             matched_axes: set[str] = set()
             if any(item.direct_score > 0 for item in ranked_events):
                 matched_axes.add("entity")
@@ -306,6 +313,13 @@ class RetrievalEngine:
 
         results.sort(key=lambda item: (-item.score, item.entity_id))
         return results[:k]
+
+    def _display_entity_id(self, entity_id: str) -> str:
+        canonical_id = self.store.resolve_redirect_target(entity_id)
+        duplicate_target = self.store.preferred_duplicate_target(canonical_id)
+        if duplicate_target is not None:
+            return self.store.resolve_redirect_target(duplicate_target)
+        return canonical_id
 
     def _known_visible_lexical_candidate_hits(
         self,

@@ -57,6 +57,51 @@ CREATE TABLE IF NOT EXISTS event_entities (
 CREATE INDEX IF NOT EXISTS idx_event_entities_entity ON event_entities(entity_id);
 CREATE INDEX IF NOT EXISTS idx_event_entities_entity_event ON event_entities(entity_id, event_id);
 
+CREATE TABLE IF NOT EXISTS entity_aliases (
+    entity_id           TEXT NOT NULL,
+    entity_type         TEXT NOT NULL,
+    alias               TEXT NOT NULL,
+    normalized_alias    TEXT NOT NULL,
+    alias_kind          TEXT NOT NULL CHECK(alias_kind IN ('name', 'alias', 'canonical_key', 'id')),
+    created_at          TEXT NOT NULL,
+    PRIMARY KEY(entity_id, alias_kind, normalized_alias)
+);
+
+CREATE INDEX IF NOT EXISTS idx_entity_aliases_lookup
+    ON entity_aliases(entity_type, alias_kind, normalized_alias, entity_id);
+
+CREATE INDEX IF NOT EXISTS idx_entity_aliases_lookup_any_kind
+    ON entity_aliases(entity_type, normalized_alias, entity_id);
+
+CREATE TABLE IF NOT EXISTS entity_redirects (
+    source_entity_id    TEXT PRIMARY KEY,
+    target_entity_id    TEXT NOT NULL,
+    merged_at           TEXT NOT NULL,
+    reason              TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_entity_redirects_target
+    ON entity_redirects(target_entity_id);
+
+CREATE TABLE IF NOT EXISTS duplicate_candidates (
+    id                  TEXT PRIMARY KEY,
+    entity_id           TEXT NOT NULL,
+    candidate_entity_id TEXT NOT NULL,
+    match_basis         TEXT NOT NULL,
+    score               REAL NOT NULL,
+    status              TEXT NOT NULL CHECK(status IN ('OPEN', 'MERGED', 'DISMISSED')),
+    reason              TEXT,
+    observed_at         TEXT NOT NULL,
+    source_turn_id      TEXT,
+    event_type          TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_duplicate_candidates_entity
+    ON duplicate_candidates(entity_id, status, score DESC, candidate_entity_id);
+
+CREATE INDEX IF NOT EXISTS idx_duplicate_candidates_candidate
+    ON duplicate_candidates(candidate_entity_id, status, score DESC, entity_id);
+
 CREATE TABLE IF NOT EXISTS dirty_ranges (
     id                 TEXT PRIMARY KEY,
     owner_id           TEXT NOT NULL,

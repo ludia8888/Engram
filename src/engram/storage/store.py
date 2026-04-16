@@ -11,7 +11,16 @@ from typing import Any, TypeAlias
 
 from engram.semantic import embedding_from_blob
 from engram.time_utils import from_rfc3339, to_rfc3339, utcnow
-from engram.types import Entity, Event, ExtractionRun, MeaningAnalysisRun, RelationEdge, SnapshotRow
+from engram.types import (
+    DuplicateCandidate,
+    Entity,
+    EntityAlias,
+    Event,
+    ExtractionRun,
+    MeaningAnalysisRun,
+    RelationEdge,
+    SnapshotRow,
+)
 
 from .entity_fold import (
     FoldedEntityState,
@@ -186,6 +195,101 @@ class EventStore:
             [(event_id, entity_id, role) for entity_id, role in entities],
         )
 
+    def append_entity_alias_rows(
+        self,
+        tx: sqlite3.Connection,
+        rows: list[tuple[str, str, str, str, str, datetime]],
+    ) -> None:
+        if not rows:
+            return
+        tx.executemany(
+            """
+            INSERT OR REPLACE INTO entity_aliases(
+                entity_id, entity_type, alias, normalized_alias, alias_kind, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    entity_id,
+                    entity_type,
+                    alias,
+                    normalized_alias,
+                    alias_kind,
+                    to_rfc3339(created_at),
+                )
+                for entity_id, entity_type, alias, normalized_alias, alias_kind, created_at in rows
+            ],
+        )
+
+    def append_duplicate_candidates(
+        self,
+        tx: sqlite3.Connection,
+        candidates: list[DuplicateCandidate],
+    ) -> None:
+        if not candidates:
+            return
+        tx.executemany(
+            """
+            INSERT OR REPLACE INTO duplicate_candidates(
+                id, entity_id, candidate_entity_id, match_basis, score, status,
+                reason, observed_at, source_turn_id, event_type
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    candidate.id,
+                    candidate.entity_id,
+                    candidate.candidate_entity_id,
+                    candidate.match_basis,
+                    candidate.score,
+                    candidate.status,
+                    candidate.reason,
+                    to_rfc3339(candidate.observed_at),
+                    candidate.source_turn_id,
+                    candidate.event_type,
+                )
+                for candidate in candidates
+            ],
+        )
+
+    def add_entity_redirect(
+        self,
+        tx: sqlite3.Connection,
+        *,
+        source_entity_id: str,
+        target_entity_id: str,
+        merged_at: datetime,
+        reason: str | None,
+    ) -> None:
+        tx.execute(
+            """
+            INSERT OR REPLACE INTO entity_redirects(
+                source_entity_id, target_entity_id, merged_at, reason
+            ) VALUES (?, ?, ?, ?)
+            """,
+            (source_entity_id, target_entity_id, to_rfc3339(merged_at), reason),
+        )
+
+    def resolve_duplicate_candidates_for_merge(
+        self,
+        tx: sqlite3.Connection,
+        *,
+        source_entity_id: str,
+        target_entity_id: str,
+    ) -> None:
+        tx.execute(
+            """
+            UPDATE duplicate_candidates
+            SET status = 'MERGED'
+            WHERE status = 'OPEN'
+              AND (
+                   (entity_id = ? AND candidate_entity_id = ?)
+                OR (entity_id = ? AND candidate_entity_id = ?)
+              )
+            """,
+            (source_entity_id, target_entity_id, target_entity_id, source_entity_id),
+        )
+
     def mark_dirty(
         self,
         tx: sqlite3.Connection,
@@ -237,6 +341,171 @@ class EventStore:
                 (analyzer_version,),
             ).fetchone()
         return int(row[0])
+
+    def entity_exists(self, entity_id: str) -> bool:
+        row = self._reader_conn.execute(
+            """
+            SELECT 1
+            FROM event_entities
+            WHERE entity_id = ?
+            LIMIT 1
+            """,
+            (entity_id,),
+        ).fetchone()
+        return row is not None
+
+    def resolve_redirect_target(self, entity_id: str) -> str:
+        current = entity_id
+        seen: set[str] = set()
+        while current not in seen:
+            seen.add(current)
+            row = self._reader_conn.execute(
+                """
+                SELECT target_entity_id
+                FROM entity_redirects
+                WHERE source_entity_id = ?
+                LIMIT 1
+                """,
+                (current,),
+            ).fetchone()
+            if row is None:
+                return current
+            current = str(row["target_entity_id"])
+        return current
+
+    def redirected_sources_for_target(self, entity_id: str) -> list[str]:
+        canonical = self.resolve_redirect_target(entity_id)
+        pending = [canonical]
+        sources: set[str] = set()
+        while pending:
+            target = pending.pop()
+            rows = self._reader_conn.execute(
+                """
+                SELECT source_entity_id
+                FROM entity_redirects
+                WHERE target_entity_id = ?
+                ORDER BY source_entity_id ASC
+                """,
+                (target,),
+            ).fetchall()
+            for row in rows:
+                source = str(row["source_entity_id"])
+                if source in sources:
+                    continue
+                sources.add(source)
+                pending.append(source)
+        return sorted(sources)
+
+    def entity_cluster_ids(self, entity_id: str) -> list[str]:
+        canonical = self.resolve_redirect_target(entity_id)
+        return [canonical, *self.redirected_sources_for_target(canonical)]
+
+    def lookup_entities_by_alias(
+        self,
+        normalized_alias: str,
+        *,
+        entity_type: str | None,
+        alias_kind: str | None,
+    ) -> list[str]:
+        clauses = ["normalized_alias = ?"]
+        params: list[object] = [normalized_alias]
+        if entity_type is not None:
+            clauses.append("entity_type = ?")
+            params.append(entity_type)
+        if alias_kind is not None:
+            clauses.append("alias_kind = ?")
+            params.append(alias_kind)
+        where_sql = " AND ".join(clauses)
+        rows = self._reader_conn.execute(
+            f"""
+            SELECT DISTINCT entity_id
+            FROM entity_aliases
+            WHERE {where_sql}
+            ORDER BY entity_id ASC
+            """,
+            params,
+        ).fetchall()
+        return [str(row["entity_id"]) for row in rows]
+
+    def list_alias_rows_for_entity(self, entity_id: str) -> list[EntityAlias]:
+        rows = self._reader_conn.execute(
+            """
+            SELECT *
+            FROM entity_aliases
+            WHERE entity_id = ?
+            ORDER BY alias_kind ASC, normalized_alias ASC
+            """,
+            (entity_id,),
+        ).fetchall()
+        return [
+            EntityAlias(
+                entity_id=str(row["entity_id"]),
+                entity_type=str(row["entity_type"]),
+                alias=str(row["alias"]),
+                normalized_alias=str(row["normalized_alias"]),
+                alias_kind=str(row["alias_kind"]),
+                created_at=from_rfc3339(str(row["created_at"])),
+            )
+            for row in rows
+        ]
+
+    def preferred_duplicate_target(self, entity_id: str) -> str | None:
+        row = self._reader_conn.execute(
+            """
+            SELECT candidate_entity_id
+            FROM duplicate_candidates
+            WHERE entity_id = ?
+              AND status = 'OPEN'
+            ORDER BY score DESC, candidate_entity_id ASC
+            LIMIT 1
+            """,
+            (entity_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return str(row["candidate_entity_id"])
+
+    def list_duplicate_candidates(
+        self,
+        *,
+        entity_id: str | None = None,
+        status: str | None = "OPEN",
+        limit: int = 100,
+    ) -> list[DuplicateCandidate]:
+        clauses: list[str] = []
+        params: list[object] = []
+        if entity_id is not None:
+            clauses.append("(entity_id = ? OR candidate_entity_id = ?)")
+            params.extend([entity_id, entity_id])
+        if status is not None:
+            clauses.append("status = ?")
+            params.append(status)
+        where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = self._reader_conn.execute(
+            f"""
+            SELECT *
+            FROM duplicate_candidates
+            {where_sql}
+            ORDER BY score DESC, observed_at DESC, id ASC
+            LIMIT ?
+            """,
+            [*params, limit],
+        ).fetchall()
+        return [
+            DuplicateCandidate(
+                id=str(row["id"]),
+                entity_id=str(row["entity_id"]),
+                candidate_entity_id=str(row["candidate_entity_id"]),
+                match_basis=str(row["match_basis"]),
+                score=float(row["score"]),
+                status=str(row["status"]),
+                reason=str(row["reason"]) if row["reason"] is not None else None,
+                observed_at=from_rfc3339(str(row["observed_at"])),
+                source_turn_id=str(row["source_turn_id"]) if row["source_turn_id"] is not None else None,
+                event_type=str(row["event_type"]),
+            )
+            for row in rows
+        ]
 
     def current_max_seq(self) -> int:
         row = self._reader_conn.execute("SELECT COALESCE(MAX(seq), 0) FROM events").fetchone()

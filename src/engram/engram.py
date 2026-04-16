@@ -9,13 +9,16 @@ from uuid import uuid4
 
 from .canonical import CanonicalWorker, Extractor, NullExtractor
 from .context_builder import ContextBuilder
+from .data_quality import DataQualityManager
 from .errors import ValidationError
 from .event_ops import derive_cascade_dirty_rows_for_entity_event, derive_dirty_rows, derive_event_entities, validate_event
 from .meaning_index import MeaningAnalyzer, MeaningIndexer, NullMeaningAnalyzer
+from .meaning_index import normalize_query_for_meaning_cache
 from .projector import Projector
 from .recovery import RecoveryService
 from .retrieval import RetrievalEngine
-from .search_terms import event_search_terms
+from .schema_registry import SchemaRegistry
+from .search_terms import event_search_terms, query_candidate_terms
 from .semantic import Embedder, HashEmbedder
 from .semantic_index import SemanticIndexer
 from .storage import EventStore, SegmentedRawLog, WriterLock, open_connection
@@ -33,7 +36,7 @@ from .types import (
     TemporalEntityView,
     TurnAck,
 )
-from .types import RelationHistoryEntry
+from .types import DuplicateCandidate, RelationHistoryEntry
 
 
 def _safe_user_id(user_id: str) -> str:
@@ -52,6 +55,7 @@ class Engram:
         extractor: Extractor | None = None,
         embedder: Embedder | None = None,
         meaning_analyzer: MeaningAnalyzer | None = None,
+        schema_registry: SchemaRegistry | None = None,
         auto_flush: bool = False,
     ):
         from .retry import RetryPolicy
@@ -67,6 +71,7 @@ class Engram:
         self.extractor = extractor or NullExtractor()
         self.embedder = embedder or HashEmbedder()
         self.meaning_analyzer = meaning_analyzer or NullMeaningAnalyzer()
+        self.schema_registry = schema_registry or SchemaRegistry.default()
 
         self._writer_lock = WriterLock(self.root / ".writer.lock")
         self.conn = None
@@ -76,9 +81,10 @@ class Engram:
             self.conn = open_connection(self.db_path)
             self.store = EventStore(self.conn, db_path=self.db_path if auto_flush else None)
             self.raw_log = SegmentedRawLog(self.root / "raw")
+            self.data_quality = DataQualityManager(self.store, self.schema_registry)
             self._bind_extractor_runtime_context()
             self.projector = Projector(self.store)
-            self.canonical_worker = CanonicalWorker(self.store, self.extractor)
+            self.canonical_worker = CanonicalWorker(self.store, self.extractor, self.data_quality)
             self.semantic_indexer = SemanticIndexer(self.store, self.embedder)
             self.meaning_indexer = MeaningIndexer(self.store, self.meaning_analyzer)
             self.retrieval = RetrievalEngine(self.store, self.embedder, self.meaning_analyzer)
@@ -201,6 +207,43 @@ class Engram:
         effective_end = ensure_utc(effective_at_end, "effective_at_end") if effective_at_end else None
         validate_event(event_type, data)
 
+        quality_batch = self.data_quality.normalize_manual_event(
+            event_type=event_type,
+            data=data,
+            observed_at=observed,
+        )
+        if not quality_batch.drafts:
+            with self.store.transaction() as tx:
+                if quality_batch.aliases:
+                    self.store.append_entity_alias_rows(
+                        tx,
+                        [
+                            (
+                                entity_id,
+                                entity_type,
+                                alias,
+                                normalized_alias,
+                                alias_kind,
+                                utcnow(),
+                            )
+                            for entity_id, entity_type, alias, normalized_alias, alias_kind in quality_batch.aliases
+                        ],
+                    )
+                if quality_batch.duplicate_candidates:
+                    self.store.append_duplicate_candidates(tx, quality_batch.duplicate_candidates)
+            self._request_background_maintenance()
+            return ""
+
+        draft = quality_batch.drafts[0]
+        event_type = draft.type
+        data = draft.data
+        effective_start = draft.effective_at_start or effective_start
+        effective_end = draft.effective_at_end or effective_end
+        source_role = draft.source_role if draft.source_role != "user" else source_role
+        confidence = draft.confidence if draft.confidence is not None else confidence
+        reason = draft.reason if draft.reason is not None else reason
+        time_confidence = draft.time_confidence if draft.time_confidence != "unknown" else time_confidence
+
         with self.store.transaction() as tx:
             if caused_by is not None and not self.store.event_exists_in_tx(tx, caused_by):
                 raise ValidationError(f"caused_by event not found: {caused_by}")
@@ -234,14 +277,32 @@ class Engram:
             self.store.append_event(tx, event)
             self.store.append_event_entities(tx, event.id, event_entities)
             self.store.append_event_search_terms(tx, event.id, event_search_terms(event))
+            if quality_batch.aliases:
+                self.store.append_entity_alias_rows(
+                    tx,
+                    [
+                        (
+                            entity_id,
+                            entity_type,
+                            alias,
+                            normalized_alias,
+                            alias_kind,
+                            recorded_at,
+                        )
+                        for entity_id, entity_type, alias, normalized_alias, alias_kind in quality_batch.aliases
+                    ],
+                )
+            if quality_batch.duplicate_candidates:
+                self.store.append_duplicate_candidates(tx, quality_batch.duplicate_candidates)
             self.store.mark_dirty(tx, dirty_rows)
         self._request_background_maintenance()
         return event.id
 
     def get(self, entity_id: str) -> Entity | None:
         now = utcnow()
-        events = self.store.entity_events_known_visible_at(entity_id, to_rfc3339(now))
-        folded = self.store.fold_entity_events(entity_id, events)
+        canonical_id = self.store.resolve_redirect_target(entity_id)
+        events = self._entity_events_known_cluster(canonical_id, now)
+        folded = self.store.fold_entity_events(canonical_id, events)
         if folded is None:
             return None
         return Entity(
@@ -250,12 +311,14 @@ class Engram:
             attrs=dict(folded.attrs),
             created_recorded_at=folded.created_recorded_at,
             updated_recorded_at=folded.updated_recorded_at,
+            redirected_from=self.store.redirected_sources_for_target(canonical_id),
         )
 
     def get_known_at(self, entity_id: str, at) -> TemporalEntityView | None:
         target = ensure_utc(at, "at")
-        events = self.store.entity_events_known_visible_at(entity_id, to_rfc3339(target))
-        folded = self.store.fold_entity_events(entity_id, events)
+        canonical_id = self.store.resolve_redirect_target(entity_id)
+        events = self._entity_events_known_cluster(canonical_id, target)
+        folded = self.store.fold_entity_events(canonical_id, events)
         if folded is None:
             return None
         return TemporalEntityView(
@@ -270,10 +333,11 @@ class Engram:
 
     def get_valid_at(self, entity_id: str, at) -> TemporalEntityView | None:
         target = ensure_utc(at, "at")
+        canonical_id = self.store.resolve_redirect_target(entity_id)
         folded = self.store.fold_entity_events_valid_at(
-            entity_id,
+            canonical_id,
             target,
-            events=self.store.entity_events_valid_visible(entity_id),
+            events=self._entity_events_valid_cluster(canonical_id),
         )
         if folded is None:
             return None
@@ -288,19 +352,21 @@ class Engram:
         )
 
     def known_history(self, entity_id: str, attr: str | None = None) -> list[HistoryEntry]:
+        canonical_id = self.store.resolve_redirect_target(entity_id)
         return self._build_history(
-            entity_id=entity_id,
+            entity_id=canonical_id,
             attr=attr,
-            events=self.store.entity_events_known_visible_at(entity_id, to_rfc3339(utcnow())),
+            events=self._entity_events_known_cluster(canonical_id, utcnow()),
             basis="known",
             skip_unknown_effective=False,
         )
 
     def valid_history(self, entity_id: str, attr: str | None = None) -> list[HistoryEntry]:
+        canonical_id = self.store.resolve_redirect_target(entity_id)
         return self._build_history(
-            entity_id=entity_id,
+            entity_id=canonical_id,
             attr=attr,
-            events=sorted(self.store.entity_events_valid_visible(entity_id), key=valid_event_sort_key),
+            events=sorted(self._entity_events_valid_cluster(canonical_id), key=valid_event_sort_key),
             basis="valid",
             skip_unknown_effective=True,
         )
@@ -313,11 +379,16 @@ class Engram:
         at: datetime | None = None,
         time_window: tuple[datetime, datetime] | None = None,
     ) -> list[RelationEdge]:
+        canonical_id = self.store.resolve_redirect_target(entity_id)
         if time_mode == "known":
             if time_window is not None:
                 raise ValidationError("time_window is not supported for known relation reads")
             target = utcnow() if at is None else ensure_utc(at, "at")
-            return self.store.relation_edges_known_at(entity_id, to_rfc3339(target))
+            return self.store.fold_relation_edges(
+                canonical_id,
+                self._relation_events_known_cluster(canonical_id, target),
+                endpoint_active=lambda candidate_id: self._entity_is_known_active_at_cluster(candidate_id, target),
+            )
 
         if time_mode == "valid":
             if at is not None and time_window is not None:
@@ -327,9 +398,23 @@ class Engram:
                 end = ensure_utc(time_window[1], "time_window[1]")
                 if start >= end:
                     raise ValidationError("time_window[0] must be before time_window[1] for valid relation reads")
-                return self.store.relation_edges_valid_in_window(entity_id, start, end)
+                return self.store.fold_relation_edges_valid_in_window(
+                    canonical_id,
+                    start,
+                    end,
+                    events=self._relation_events_valid_cluster(canonical_id),
+                    endpoint_active_in_window=lambda source, target_id, overlap_start, overlap_end: (
+                        self._entity_is_valid_in_window_cluster(source, overlap_start, overlap_end)
+                        and self._entity_is_valid_in_window_cluster(target_id, overlap_start, overlap_end)
+                    ),
+                )
             target = utcnow() if at is None else ensure_utc(at, "at")
-            return self.store.relation_edges_valid_at(entity_id, target)
+            return self.store.fold_relation_edges_valid_at(
+                canonical_id,
+                target,
+                events=self._relation_events_valid_cluster(canonical_id),
+                endpoint_active=lambda candidate_id: self._entity_is_valid_at_cluster(candidate_id, target),
+            )
 
         raise ValidationError(f"unsupported time_mode: {time_mode}")
 
@@ -341,10 +426,11 @@ class Engram:
         other_entity_id: str | None = None,
         time_mode: Literal["known", "valid"] = "known",
     ) -> list[RelationHistoryEntry]:
+        canonical_id = self.store.resolve_redirect_target(entity_id)
         if time_mode == "known":
-            events = self.store.relation_events_known_visible_at(entity_id, to_rfc3339(utcnow()))
+            events = self._relation_events_known_cluster(canonical_id, utcnow())
             return self._build_relation_history(
-                entity_id=entity_id,
+                entity_id=canonical_id,
                 relation_type=relation_type,
                 other_entity_id=other_entity_id,
                 events=events,
@@ -352,9 +438,9 @@ class Engram:
             )
 
         if time_mode == "valid":
-            events = sorted(self.store.relation_events_valid_visible(entity_id), key=valid_event_sort_key)
+            events = sorted(self._relation_events_valid_cluster(canonical_id), key=valid_event_sort_key)
             return self._build_relation_history(
-                entity_id=entity_id,
+                entity_id=canonical_id,
                 relation_type=relation_type,
                 other_entity_id=other_entity_id,
                 events=events,
@@ -362,6 +448,20 @@ class Engram:
             )
 
         raise ValidationError(f"unsupported time_mode: {time_mode}")
+
+    def merge_entities(self, source_id: str, target_id: str, *, reason: str | None = None) -> str:
+        merged_to = self.data_quality.merge_entities(source_id, target_id, reason=reason)
+        self._request_background_maintenance()
+        return merged_to
+
+    def list_duplicate_candidates(
+        self,
+        *,
+        entity_id: str | None = None,
+        status: str | None = "OPEN",
+        limit: int = 100,
+    ) -> list[DuplicateCandidate]:
+        return self.store.list_duplicate_candidates(entity_id=entity_id, status=status, limit=limit)
 
     def reprocess(
         self,
@@ -538,13 +638,128 @@ class Engram:
     def raw_recent(self, limit: int = 20) -> list[RawTurn]:
         return self.raw_log.raw_recent(limit=limit)
 
+    def _entity_events_known_cluster(self, entity_id: str, at: datetime) -> list[Event]:
+        canonical_id = self.store.resolve_redirect_target(entity_id)
+        cluster_ids = self.store.entity_cluster_ids(canonical_id)
+        events_by_entity = self.store.entity_events_known_visible_for_entities(cluster_ids, to_rfc3339(at))
+        return self._remap_cluster_events(canonical_id, cluster_ids, events_by_entity)
+
+    def _entity_events_valid_cluster(self, entity_id: str) -> list[Event]:
+        canonical_id = self.store.resolve_redirect_target(entity_id)
+        cluster_ids = self.store.entity_cluster_ids(canonical_id)
+        events_by_entity = self.store.entity_events_valid_visible_for_entities(cluster_ids)
+        return self._remap_cluster_events(canonical_id, cluster_ids, events_by_entity)
+
+    def _relation_events_known_cluster(self, entity_id: str, at: datetime) -> list[Event]:
+        return [
+            event
+            for event in self._entity_events_known_cluster(entity_id, at)
+            if event.type.startswith("relation.")
+        ]
+
+    def _relation_events_valid_cluster(self, entity_id: str) -> list[Event]:
+        return [
+            event
+            for event in self._entity_events_valid_cluster(entity_id)
+            if event.type.startswith("relation.")
+        ]
+
+    def _entity_is_known_active_at_cluster(self, entity_id: str, at: datetime) -> bool:
+        canonical_id = self.store.resolve_redirect_target(entity_id)
+        folded = self.store.fold_entity_events(canonical_id, self._entity_events_known_cluster(canonical_id, at))
+        return folded is not None
+
+    def _entity_is_valid_at_cluster(self, entity_id: str, at: datetime) -> bool:
+        canonical_id = self.store.resolve_redirect_target(entity_id)
+        folded = self.store.fold_entity_events_valid_at(
+            canonical_id,
+            at,
+            events=self._entity_events_valid_cluster(canonical_id),
+        )
+        return folded is not None and folded.active
+
+    def _entity_is_valid_in_window_cluster(self, entity_id: str, start_at: datetime, end_at: datetime) -> bool:
+        canonical_id = self.store.resolve_redirect_target(entity_id)
+        events = self._entity_events_valid_cluster(canonical_id)
+        for event in events:
+            if not event.type.startswith("entity.") or event.data["id"] != canonical_id:
+                continue
+            if event.effective_at_start is None:
+                continue
+            event_start = event.effective_at_start
+            event_end = event.effective_at_end
+            if event_start <= end_at and (event_end is None or event_end >= start_at):
+                return True
+        return False
+
+    def _remap_cluster_events(
+        self,
+        canonical_id: str,
+        cluster_ids: list[str],
+        events_by_entity: dict[str, list[Event]],
+    ) -> list[Event]:
+        remap_ids = {cluster_id: canonical_id for cluster_id in cluster_ids if cluster_id != canonical_id}
+        merged: dict[str, Event] = {}
+        for entity_id in cluster_ids:
+            for event in events_by_entity.get(entity_id, []):
+                merged[event.id] = self._remap_event_entity_ids(event, remap_ids)
+        return sorted(merged.values(), key=lambda event: (event.recorded_at, event.seq, event.id))
+
+    def _remap_event_entity_ids(self, event: Event, remap_ids: dict[str, str]) -> Event:
+        if not remap_ids:
+            return event
+        data = dict(event.data)
+        changed = False
+        if event.type.startswith("entity."):
+            entity_id = str(data.get("id"))
+            if entity_id in remap_ids:
+                data["id"] = remap_ids[entity_id]
+                changed = True
+        elif event.type.startswith("relation."):
+            source = str(data.get("source"))
+            target = str(data.get("target"))
+            if source in remap_ids:
+                data["source"] = remap_ids[source]
+                changed = True
+            if target in remap_ids:
+                data["target"] = remap_ids[target]
+                changed = True
+        if not changed:
+            return event
+        return Event(
+            id=event.id,
+            seq=event.seq,
+            observed_at=event.observed_at,
+            effective_at_start=event.effective_at_start,
+            effective_at_end=event.effective_at_end,
+            recorded_at=event.recorded_at,
+            type=event.type,
+            data=data,
+            extraction_run_id=event.extraction_run_id,
+            source_turn_id=event.source_turn_id,
+            source_role=event.source_role,
+            confidence=event.confidence,
+            reason=event.reason,
+            time_confidence=event.time_confidence,
+            caused_by=event.caused_by,
+            schema_version=event.schema_version,
+        )
+
     def _bind_extractor_runtime_context(self) -> None:
         bind = getattr(self.extractor, "bind_runtime_context", None)
         if callable(bind):
-            bind(
-                safe_user_id=self.safe_user_id,
-                recent_turns_provider=self._recent_turns_for_extractor,
-            )
+            try:
+                bind(
+                    safe_user_id=self.safe_user_id,
+                    recent_turns_provider=self._recent_turns_for_extractor,
+                    schema_registry=self.schema_registry,
+                    entity_shortlist_provider=self._entity_shortlist_for_extractor,
+                )
+            except TypeError:
+                bind(
+                    safe_user_id=self.safe_user_id,
+                    recent_turns_provider=self._recent_turns_for_extractor,
+                )
 
     def _recent_turns_for_extractor(self, item: QueueItem, limit: int) -> list[RawTurn]:
         if item.session_id is not None:
@@ -559,6 +774,35 @@ class Engram:
             if len(filtered) == limit:
                 break
         return list(reversed(filtered))
+
+    def _entity_shortlist_for_extractor(self, item: QueueItem, limit: int) -> list[dict]:
+        mentions = [token for token in query_candidate_terms(item.user) if token]
+        candidates: list[dict] = []
+        seen: set[str] = set()
+        for mention in mentions:
+            for entity_id in self.store.lookup_entities_by_alias(
+                normalize_query_for_meaning_cache(mention),
+                entity_type=None,
+                alias_kind=None,
+            ):
+                canonical_id = self.store.resolve_redirect_target(entity_id)
+                if canonical_id in seen:
+                    continue
+                seen.add(canonical_id)
+                entity = self.get(canonical_id)
+                if entity is None:
+                    continue
+                candidates.append(
+                    {
+                        "id": entity.id,
+                        "type": entity.type,
+                        "attrs": entity.attrs,
+                        "redirected_from": entity.redirected_from,
+                    }
+                )
+                if len(candidates) >= limit:
+                    return candidates
+        return candidates
 
     def search(
         self,
@@ -600,6 +844,7 @@ class Engram:
         else:
             results = self.search(query, time_mode=time_mode, time_window=time_window, k=5)
         entity_ids = [result.entity_id for result in results]
+        duplicate_hints = self._duplicate_hints_for_entities(entity_ids)
         if time_mode == "known":
             return self.context_builder.build_known(
                 query=query,
@@ -610,6 +855,7 @@ class Engram:
                 include_raw=include_raw,
                 views_by_entity=self._get_known_views_at_many(entity_ids, as_of),
                 relations_by_entity=self._get_known_relations_at_many(entity_ids, as_of),
+                duplicate_hints_by_entity=duplicate_hints,
             )
         if time_mode == "valid":
             valid_at = ensure_utc(as_of, "as_of")
@@ -632,6 +878,7 @@ class Engram:
                 include_raw=include_raw,
                 views_by_entity=self._get_valid_views_at_many(entity_ids, valid_at),
                 relations_by_entity=relations_by_entity,
+                duplicate_hints_by_entity=duplicate_hints,
             )
         raise ValidationError(f"unsupported time_mode: {time_mode}")
 
@@ -686,59 +933,33 @@ class Engram:
 
     def _get_known_relations_at(self, entity_id: str, at) -> list[RelationEdge]:
         target = ensure_utc(at, "at")
-        return self.store.relation_edges_known_at(entity_id, to_rfc3339(target))
+        return self.get_relations(entity_id, time_mode="known", at=target)
 
     def _get_known_views_at_many(self, entity_ids: list[str], at) -> dict[str, TemporalEntityView | None]:
         target = ensure_utc(at, "at")
-        folded_by_entity = self.store.fold_entities_known_at(entity_ids, to_rfc3339(target))
         views: dict[str, TemporalEntityView | None] = {}
         for entity_id in entity_ids:
-            folded = folded_by_entity.get(entity_id)
-            if folded is None:
-                views[entity_id] = None
-                continue
-            views[entity_id] = TemporalEntityView(
-                entity_id=folded.entity_id,
-                entity_type=folded.entity_type,
-                attrs=dict(folded.attrs),
-                unknown_attrs=[],
-                supporting_event_ids=list(folded.supporting_event_ids),
-                basis="known",
-                as_of=target,
-            )
+            views[entity_id] = self.get_known_at(entity_id, target)
         return views
 
     def _get_known_relations_at_many(self, entity_ids: list[str], at) -> dict[str, list[RelationEdge]]:
         target = ensure_utc(at, "at")
-        return self.store.relation_edges_known_at_many(entity_ids, to_rfc3339(target))
+        return {entity_id: self.get_relations(entity_id, time_mode="known", at=target) for entity_id in entity_ids}
 
     def _get_valid_relations_at(self, entity_id: str, at) -> list[RelationEdge]:
         target = ensure_utc(at, "at")
-        return self.store.relation_edges_valid_at(entity_id, target)
+        return self.get_relations(entity_id, time_mode="valid", at=target)
 
     def _get_valid_views_at_many(self, entity_ids: list[str], at) -> dict[str, TemporalEntityView | None]:
         target = ensure_utc(at, "at")
-        folded_by_entity = self.store.fold_entities_valid_at(entity_ids, target)
         views: dict[str, TemporalEntityView | None] = {}
         for entity_id in entity_ids:
-            folded = folded_by_entity.get(entity_id)
-            if folded is None:
-                views[entity_id] = None
-                continue
-            views[entity_id] = TemporalEntityView(
-                entity_id=folded.entity_id,
-                entity_type=folded.entity_type,
-                attrs=dict(folded.attrs),
-                unknown_attrs=list(folded.unknown_attrs),
-                supporting_event_ids=list(folded.supporting_event_ids),
-                basis="valid",
-                as_of=target,
-            )
+            views[entity_id] = self.get_valid_at(entity_id, target)
         return views
 
     def _get_valid_relations_at_many(self, entity_ids: list[str], at) -> dict[str, list[RelationEdge]]:
         target = ensure_utc(at, "at")
-        return self.store.relation_edges_valid_at_many(entity_ids, target)
+        return {entity_id: self.get_relations(entity_id, time_mode="valid", at=target) for entity_id in entity_ids}
 
     def _get_valid_relations_in_window(
         self,
@@ -750,7 +971,7 @@ class Engram:
         end = ensure_utc(end_at, "end_at")
         if start >= end:
             return []
-        return self.store.relation_edges_valid_in_window(entity_id, start, end)
+        return self.get_relations(entity_id, time_mode="valid", time_window=(start, end))
 
     def _get_valid_relations_in_window_many(
         self,
@@ -764,9 +985,22 @@ class Engram:
         end = ensure_utc(end_at, "end_at")
         if start >= end:
             return {entity_id: [] for entity_id in entity_ids}
-        return self.store.relation_edges_valid_in_window_many(
-            entity_ids,
-            start,
-            end,
-            query_cache=relation_window_cache,
-        )
+        return {
+            entity_id: self.get_relations(entity_id, time_mode="valid", time_window=(start, end))
+            for entity_id in entity_ids
+        }
+
+    def _duplicate_hints_for_entities(self, entity_ids: list[str]) -> dict[str, list[str]]:
+        hints: dict[str, list[str]] = {}
+        for entity_id in entity_ids:
+            candidates = self.store.list_duplicate_candidates(entity_id=entity_id, status="OPEN", limit=5)
+            if not candidates:
+                continue
+            descriptions: list[str] = []
+            for candidate in candidates:
+                other = candidate.candidate_entity_id if candidate.entity_id == entity_id else candidate.entity_id
+                descriptions.append(
+                    f"{entity_id} is likely the same real-world target as {other} ({candidate.match_basis}, score={candidate.score:.2f})"
+                )
+            hints[entity_id] = descriptions
+        return hints
