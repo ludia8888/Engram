@@ -6,7 +6,8 @@ build-backend = "hatchling.build"
 name = "engram"
 version = "0.1.0"
 description = "Embedded event-sourced memory engine for LLM applications"
-readme = "engram_design_v2.3.md"
+readme = "README.md"
+license = "MIT"
 requires-python = ">=3.12"
 dependencies = []
 
