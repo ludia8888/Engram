@@ -115,6 +115,24 @@ class EventStore:
             else:
                 self._writer_conn.commit()
 
+    @contextmanager
+    def try_transaction(self):
+        acquired = self._tx_lock.acquire(blocking=False)
+        if not acquired:
+            yield None
+            return
+        try:
+            self._writer_conn.execute("BEGIN IMMEDIATE")
+            try:
+                yield self._writer_conn
+            except Exception:
+                self._writer_conn.rollback()
+                raise
+            else:
+                self._writer_conn.commit()
+        finally:
+            self._tx_lock.release()
+
     def event_exists_in_tx(self, tx: sqlite3.Connection, event_id: str) -> bool:
         row = tx.execute(
             "SELECT 1 FROM events WHERE id = ? LIMIT 1",

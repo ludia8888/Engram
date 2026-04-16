@@ -603,8 +603,14 @@ class RetrievalEngine:
         self,
         normalized_query: str,
         plan: QueryMeaningPlan,
-    ) -> None:
-        with self.store.transaction() as tx:
+    ) -> bool:
+        with self.store.try_transaction() as tx:
+            if tx is None:
+                logger.debug(
+                    "skipping query meaning cache write for %s because writer lock is busy",
+                    normalized_query,
+                )
+                return False
             self.store.save_query_meaning_cache(
                 tx,
                 normalized_query=normalized_query,
@@ -617,6 +623,7 @@ class RetrievalEngine:
                 analyzer_version=self.meaning_analyzer.version,
                 keep_count=_QUERY_MEANING_CACHE_MAX_ROWS,
             )
+        return True
 
     def _schedule_query_plan(self, query: str, normalized_query: str) -> None:
         if self._query_plan_queue is None:

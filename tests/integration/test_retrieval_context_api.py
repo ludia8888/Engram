@@ -468,6 +468,69 @@ def test_search_cache_miss_does_not_block_on_meaning_planner(tmp_path):
     mem.close()
 
 
+def test_query_plan_cache_write_is_best_effort_when_writer_lock_is_busy(tmp_path):
+    analyzer = BlockingMeaningAnalyzer(
+        event_units={
+            "user:precise": [
+                MeaningUnit(
+                    kind="alias",
+                    value="special traveler",
+                    normalized_value="special traveler",
+                    confidence=1.0,
+                )
+            ]
+        },
+        query_plans={
+            "special traveler": QueryMeaningPlan(
+                units=[
+                    MeaningUnit(
+                        kind="alias",
+                        value="special traveler",
+                        normalized_value="special traveler",
+                        confidence=1.0,
+                    )
+                ],
+                fallback_terms=["special", "traveler"],
+                planner_confidence=0.95,
+            )
+        },
+    )
+    mem = Engram(user_id="alice", path=str(tmp_path), meaning_analyzer=analyzer)
+    mem.append(
+        "entity.create",
+        {"id": "user:precise", "type": "user", "attrs": {"label": "special-traveler"}},
+        observed_at=dt("2026-05-01T10:00:00Z"),
+        reason="rare alias entity",
+    )
+    mem.flush("index")
+
+    first = mem.search("special traveler", k=5)
+    assert first
+    assert analyzer.started.wait(timeout=1.0)
+
+    cache_key = normalize_query_for_meaning_cache("special traveler")
+    mem.store._tx_lock.acquire()
+    try:
+        analyzer.release.set()
+        time.sleep(0.2)
+        assert (
+            mem.store.load_query_meaning_cache(cache_key, analyzer.version)
+            is None
+        )
+    finally:
+        mem.store._tx_lock.release()
+
+    assert _wait_for(lambda: len(analyzer.plan_calls) >= 1)
+    second = mem.search("special traveler", k=5)
+    assert second[0].entity_id == "user:precise"
+    assert _wait_for(
+        lambda: mem.store.load_query_meaning_cache(cache_key, analyzer.version) is not None
+    )
+    assert len(analyzer.plan_calls) >= 2
+
+    mem.close()
+
+
 def test_search_meaning_idf_prefers_rare_alias_over_multiple_common_facets(tmp_path):
     event_units: dict[str, list[MeaningUnit]] = {
         "user:precise": [
