@@ -103,6 +103,8 @@ class Engram:
             if self._background_worker is not None:
                 self._background_worker.stop()
                 self._background_worker = None
+            if hasattr(self, "store"):
+                self.store.close_readers()
             if self.conn is not None:
                 self.conn.close()
                 self.conn = None
@@ -114,6 +116,7 @@ class Engram:
             if self._background_worker is not None:
                 self._background_worker.stop()
                 self._background_worker = None
+            self.store.close_readers()
             if self.conn is not None:
                 self.conn.close()
                 self.conn = None
