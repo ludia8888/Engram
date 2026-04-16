@@ -170,6 +170,19 @@ class ProjectionRebuildResult:
 
 
 @dataclass(frozen=True, slots=True)
+class SnapshotRow:
+    id: str
+    basis: str
+    created_at: datetime
+    last_seq: int
+    projection_version: int
+    max_recorded_at_included: datetime
+    max_effective_at_included: datetime | None
+    state_blob: bytes
+    relation_blob: bytes
+
+
+@dataclass(frozen=True, slots=True)
 class RelationEdge:
     relation_type: str
     other_entity_id: str

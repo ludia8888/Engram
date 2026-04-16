@@ -4,13 +4,14 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 import json
 import sqlite3
+import threading
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, TypeAlias
 
 from engram.semantic import embedding_from_blob
 from engram.time_utils import from_rfc3339, to_rfc3339, utcnow
-from engram.types import Entity, Event, ExtractionRun, RelationEdge
+from engram.types import Entity, Event, ExtractionRun, RelationEdge, SnapshotRow
 
 from .entity_fold import (
     FoldedEntityState,
@@ -45,7 +46,7 @@ class RelationWindowQueryCache:
 
 def open_connection(db_path: Path) -> sqlite3.Connection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode = WAL;")
     conn.execute("PRAGMA synchronous = FULL;")
@@ -60,17 +61,19 @@ def open_connection(db_path: Path) -> sqlite3.Connection:
 class EventStore:
     def __init__(self, conn: sqlite3.Connection):
         self.conn = conn
+        self._tx_lock = threading.Lock()
 
     @contextmanager
     def transaction(self):
-        self.conn.execute("BEGIN IMMEDIATE")
-        try:
-            yield self.conn
-        except Exception:
-            self.conn.rollback()
-            raise
-        else:
-            self.conn.commit()
+        with self._tx_lock:
+            self.conn.execute("BEGIN IMMEDIATE")
+            try:
+                yield self.conn
+            except Exception:
+                self.conn.rollback()
+                raise
+            else:
+                self.conn.commit()
 
     def next_seq(self, tx: sqlite3.Connection) -> int:
         row = tx.execute("SELECT COALESCE(MAX(seq), 0) + 1 FROM events").fetchone()
@@ -159,6 +162,80 @@ class EventStore:
     def count_event_search_terms(self) -> int:
         row = self.conn.execute("SELECT COUNT(*) FROM event_search_terms").fetchone()
         return int(row[0])
+
+    def current_max_seq(self) -> int:
+        row = self.conn.execute("SELECT COALESCE(MAX(seq), 0) FROM events").fetchone()
+        return int(row[0])
+
+    def max_recorded_at_for_seq(self, last_seq: int) -> str | None:
+        row = self.conn.execute(
+            "SELECT MAX(recorded_at) FROM events WHERE seq <= ?",
+            (last_seq,),
+        ).fetchone()
+        return row[0] if row and row[0] else None
+
+    def save_snapshot(self, tx: sqlite3.Connection, row: SnapshotRow) -> None:
+        tx.execute(
+            """
+            INSERT INTO snapshots(
+                id, basis, created_at, last_seq, projection_version,
+                max_recorded_at_included, max_effective_at_included,
+                state_blob, relation_blob
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                row.id,
+                row.basis,
+                to_rfc3339(row.created_at),
+                row.last_seq,
+                row.projection_version,
+                to_rfc3339(row.max_recorded_at_included),
+                to_rfc3339(row.max_effective_at_included) if row.max_effective_at_included else None,
+                row.state_blob,
+                row.relation_blob,
+            ),
+        )
+
+    def load_latest_snapshot(self) -> SnapshotRow | None:
+        row = self.conn.execute(
+            """
+            SELECT * FROM snapshots
+            ORDER BY last_seq DESC
+            LIMIT 1
+            """
+        ).fetchone()
+        if row is None:
+            return None
+        return SnapshotRow(
+            id=row["id"],
+            basis=row["basis"],
+            created_at=from_rfc3339(row["created_at"]),
+            last_seq=int(row["last_seq"]),
+            projection_version=int(row["projection_version"]),
+            max_recorded_at_included=from_rfc3339(row["max_recorded_at_included"]),
+            max_effective_at_included=from_rfc3339(row["max_effective_at_included"]) if row["max_effective_at_included"] else None,
+            state_blob=row["state_blob"],
+            relation_blob=row["relation_blob"],
+        )
+
+    def delete_snapshot_by_id(self, tx: sqlite3.Connection, snapshot_id: str) -> None:
+        tx.execute("DELETE FROM snapshots WHERE id = ?", (snapshot_id,))
+
+    def delete_old_snapshots(self, tx: sqlite3.Connection, keep_count: int = 3) -> int:
+        rows = tx.execute(
+            """
+            SELECT id FROM snapshots
+            ORDER BY last_seq DESC
+            LIMIT -1 OFFSET ?
+            """,
+            (keep_count,),
+        ).fetchall()
+        if not rows:
+            return 0
+        ids = [row["id"] for row in rows]
+        placeholders = ",".join("?" for _ in ids)
+        tx.execute(f"DELETE FROM snapshots WHERE id IN ({placeholders})", ids)
+        return len(ids)
 
     def event_exists(self, event_id: str) -> bool:
         row = self.conn.execute(
@@ -320,6 +397,19 @@ class EventStore:
             (extractor_version,),
         ).fetchall()
         return {str(row[0]) for row in rows}
+
+    def count_failed_runs_for_turn(self, source_turn_id: str, extractor_version: str) -> int:
+        row = self.conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM extraction_runs
+            WHERE source_turn_id = ?
+              AND extractor_version = ?
+              AND status = 'FAILED'
+            """,
+            (source_turn_id, extractor_version),
+        ).fetchone()
+        return int(row[0])
 
     def has_successful_extraction_run(self, source_turn_id: str, extractor_version: str) -> bool:
         row = self.conn.execute(

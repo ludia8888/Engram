@@ -164,3 +164,96 @@ def test_startup_failure_releases_writer_lock_and_allows_retry(tmp_path):
     retry = Engram(user_id="alice", path=str(tmp_path), queue_max_size=4, queue_put_timeout=0.001)
     assert retry.queue.qsize() == 2
     retry.close()
+
+
+def test_startup_loads_snapshot_then_rebuilds_delta(tmp_path):
+    first = Engram(user_id="alice", path=str(tmp_path))
+    first.append(
+        "entity.create",
+        {"id": "user:alice", "type": "user", "attrs": {"diet": "vegetarian"}},
+        observed_at=dt("2026-05-01T10:00:00Z"),
+    )
+    first.flush("all")
+
+    snapshot = first.projector.current_snapshot()
+    assert "user:alice" in snapshot
+
+    first.append(
+        "entity.update",
+        {"id": "user:alice", "attrs": {"location": "Busan"}},
+        observed_at=dt("2026-05-01T11:00:00Z"),
+    )
+    first.close()
+
+    second = Engram(user_id="alice", path=str(tmp_path))
+
+    snapshot = second.projector.current_snapshot()
+    assert "user:alice" in snapshot
+    assert snapshot["user:alice"].attrs == {"diet": "vegetarian", "location": "Busan"}
+    assert second.store.count_dirty_ranges() == 0
+
+    second.close()
+
+
+def test_corrupt_snapshot_does_not_block_startup(tmp_path):
+    first = Engram(user_id="alice", path=str(tmp_path))
+    first.append(
+        "entity.create",
+        {"id": "user:alice", "type": "user", "attrs": {"diet": "vegetarian"}},
+        observed_at=dt("2026-05-01T10:00:00Z"),
+    )
+    first.flush("all")
+    assert first.store.load_latest_snapshot() is not None
+
+    first.conn.execute(
+        "UPDATE snapshots SET state_blob = X'DEADBEEF', relation_blob = X'DEADBEEF'"
+    )
+    first.conn.commit()
+    first.close()
+
+    second = Engram(user_id="alice", path=str(tmp_path))
+
+    assert second.store.load_latest_snapshot() is None
+    view = second.get("user:alice")
+    assert view is not None
+    assert view.attrs == {"diet": "vegetarian"}
+
+    second.close()
+
+
+def test_stale_snapshot_with_no_dirty_ranges_still_rebuilds(tmp_path):
+    first = Engram(user_id="alice", path=str(tmp_path))
+    first.append(
+        "entity.create",
+        {"id": "user:alice", "type": "user", "attrs": {"diet": "vegetarian"}},
+        observed_at=dt("2026-05-01T10:00:00Z"),
+    )
+    first.flush("all")
+
+    snapshot = first.store.load_latest_snapshot()
+    assert snapshot is not None
+    stale_seq = snapshot.last_seq
+
+    first.append(
+        "entity.update",
+        {"id": "user:alice", "attrs": {"location": "Busan"}},
+        observed_at=dt("2026-05-01T11:00:00Z"),
+    )
+    first.flush("projection")
+
+    assert first.store.count_dirty_ranges() == 0
+    assert first.store.current_max_seq() > stale_seq
+    first.close()
+
+    second = Engram(user_id="alice", path=str(tmp_path))
+
+    assert second.store.count_dirty_ranges() == 0
+    view = second.get("user:alice")
+    assert view is not None
+    assert view.attrs == {"diet": "vegetarian", "location": "Busan"}
+
+    snapshot_after = second.projector.current_snapshot()
+    assert "user:alice" in snapshot_after
+    assert snapshot_after["user:alice"].attrs == {"diet": "vegetarian", "location": "Busan"}
+
+    second.close()

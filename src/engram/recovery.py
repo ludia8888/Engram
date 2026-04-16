@@ -27,10 +27,18 @@ class RecoveryService:
         self.extractor_version = extractor_version
 
     def catch_up_on_startup(self) -> int:
-        while self.store.count_dirty_ranges() > 0:
-            rebuilt = self.projector.rebuild_dirty()
-            if rebuilt == 0 and self.store.count_dirty_ranges() > 0:
-                raise RuntimeError("startup projection recovery made no progress")
+        snapshot_loaded = self.projector.load_snapshot()
+        canonical_max_seq = self.store.current_max_seq()
+
+        if snapshot_loaded and self.projector.snapshot_last_seq < canonical_max_seq:
+            self.projector.rebuild_all()
+        elif not snapshot_loaded and canonical_max_seq > 0:
+            self.projector.rebuild_all()
+        else:
+            while self.store.count_dirty_ranges() > 0:
+                rebuilt = self.projector.rebuild_dirty()
+                if rebuilt == 0 and self.store.count_dirty_ranges() > 0:
+                    raise RuntimeError("startup projection recovery made no progress")
 
         processed_turn_ids = self.store.successful_source_turn_ids(self.extractor_version)
         enqueued = 0
