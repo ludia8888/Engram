@@ -4,6 +4,7 @@ from collections import defaultdict
 from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime
+import math
 from typing import Callable, Literal
 
 from .meaning_index import (
@@ -362,12 +363,22 @@ class RetrievalEngine:
         if not matches:
             return None
 
+        corpus_size = self.store.meaning_analyzer_document_count(self.meaning_analyzer.version)
+        document_frequencies = self.store.meaning_unit_document_frequencies(
+            self.meaning_analyzer.version,
+            lookups,
+        )
+
         direct_events = visible_events_provider(time_window, sorted(matches))
         if not direct_events:
             return None
 
         lexical_scores = {
-            event.id: self._meaning_score(matches.get(event.id, ()))
+            event.id: self._meaning_score(
+                matches.get(event.id, ()),
+                corpus_size=corpus_size,
+                document_frequencies=document_frequencies,
+            )
             for event in direct_events
         }
         if not any(score > 0 for score in lexical_scores.values()):
@@ -435,6 +446,9 @@ class RetrievalEngine:
     def _meaning_score(
         self,
         matches: list[tuple[str, str, str, float | None]] | tuple[tuple[str, str, str, float | None], ...],
+        *,
+        corpus_size: int,
+        document_frequencies: dict[tuple[str, str, str], int],
     ) -> float:
         score = 0.0
         seen: set[tuple[str, str, str]] = set()
@@ -443,7 +457,11 @@ class RetrievalEngine:
             if match_key in seen:
                 continue
             seen.add(match_key)
-            score += _MEANING_KIND_WEIGHTS.get(unit_kind, 0.0) * (confidence if confidence is not None else 1.0)
+            score += (
+                _MEANING_KIND_WEIGHTS.get(unit_kind, 0.0)
+                * _meaning_idf(corpus_size, document_frequencies.get(match_key, 1))
+                * (confidence if confidence is not None else 1.0)
+            )
         return score
 
     def _known_visible_events(
@@ -587,3 +605,10 @@ def _score_event_lexical(event: Event, tokens: list[QueryToken]) -> float:
     if phrase and phrase in haystack:
         score += 0.25
     return score
+
+
+def _meaning_idf(corpus_size: int, document_frequency: int) -> float:
+    if corpus_size <= 0:
+        return 1.0
+    df = max(document_frequency, 0)
+    return math.log((1 + corpus_size) / (1 + df)) + 1.0

@@ -370,6 +370,90 @@ def test_search_caches_query_meaning_plan_between_calls(tmp_path):
     mem.close()
 
 
+def test_search_meaning_idf_prefers_rare_alias_over_multiple_common_facets(tmp_path):
+    event_units: dict[str, list[MeaningUnit]] = {
+        "user:precise": [
+            MeaningUnit(
+                kind="alias",
+                value="special-traveler",
+                normalized_value="special-traveler",
+                confidence=1.0,
+            )
+        ]
+    }
+    for index in range(20):
+        event_units[f"user:broad:{index}"] = [
+            MeaningUnit(
+                kind="facet",
+                key="role",
+                value="traveler",
+                normalized_value="traveler",
+                confidence=1.0,
+            ),
+            MeaningUnit(
+                kind="facet",
+                key="category",
+                value="user",
+                normalized_value="user",
+                confidence=1.0,
+            ),
+        ]
+
+    analyzer = StaticMeaningAnalyzer(
+        event_units=event_units,
+        query_plans={
+            "special traveler": QueryMeaningPlan(
+                units=[
+                    MeaningUnit(
+                        kind="alias",
+                        value="special-traveler",
+                        normalized_value="special-traveler",
+                        confidence=1.0,
+                    ),
+                    MeaningUnit(
+                        kind="facet",
+                        key="role",
+                        value="traveler",
+                        normalized_value="traveler",
+                        confidence=1.0,
+                    ),
+                    MeaningUnit(
+                        kind="facet",
+                        key="category",
+                        value="user",
+                        normalized_value="user",
+                        confidence=1.0,
+                    ),
+                ],
+                fallback_terms=["special", "traveler"],
+                planner_confidence=0.95,
+            )
+        },
+    )
+    mem = Engram(user_id="alice", path=str(tmp_path), meaning_analyzer=analyzer)
+    mem.append(
+        "entity.create",
+        {"id": "user:precise", "type": "user", "attrs": {"label": "special-traveler"}},
+        observed_at=dt("2026-05-01T10:00:00Z"),
+        reason="rare alias entity",
+    )
+    for index in range(20):
+        mem.append(
+            "entity.create",
+            {"id": f"user:broad:{index}", "type": "user", "attrs": {"role": "traveler", "category": "user"}},
+            observed_at=dt(f"2026-05-01T10:{index + 1:02d}:00Z"),
+            reason="common facet entity",
+        )
+    mem.flush("index")
+
+    results = mem.search("special traveler", k=5)
+
+    assert results
+    assert results[0].entity_id == "user:precise"
+
+    mem.close()
+
+
 def test_search_uses_openai_meaning_analyzer_end_to_end(tmp_path, monkeypatch):
     responses = [
         {

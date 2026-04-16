@@ -575,6 +575,52 @@ class EventStore:
             )
         return matches
 
+    def meaning_analyzer_document_count(self, analyzer_version: str) -> int:
+        row = self._reader_conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM meaning_analysis_runs
+            WHERE analyzer_version = ?
+              AND status = 'SUCCEEDED'
+            """,
+            (analyzer_version,),
+        ).fetchone()
+        return int(row[0]) if row is not None else 0
+
+    def meaning_unit_document_frequencies(
+        self,
+        analyzer_version: str,
+        lookups: list[tuple[str, str, str]],
+    ) -> dict[tuple[str, str, str], int]:
+        if not lookups:
+            return {}
+
+        clauses: list[str] = []
+        params: list[object] = [analyzer_version]
+        for unit_kind, unit_key, normalized_value in lookups:
+            clauses.append("(unit_kind = ? AND unit_key = ? AND normalized_value = ?)")
+            params.extend([unit_kind, unit_key, normalized_value])
+
+        lookup_sql = " OR ".join(clauses)
+        rows = self._reader_conn.execute(
+            f"""
+            SELECT unit_kind, unit_key, normalized_value, COUNT(DISTINCT event_id) AS df
+            FROM event_search_units
+            WHERE analyzer_version = ?
+              AND ({lookup_sql})
+            GROUP BY unit_kind, unit_key, normalized_value
+            """,
+            params,
+        ).fetchall()
+        return {
+            (
+                str(row["unit_kind"]),
+                str(row["unit_key"] or ""),
+                str(row["normalized_value"]),
+            ): int(row["df"])
+            for row in rows
+        }
+
     def candidate_event_ids_for_search_terms(self, terms: list[str]) -> list[str]:
         if not terms:
             return []

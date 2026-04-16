@@ -129,6 +129,9 @@ CREATE TABLE IF NOT EXISTS meaning_analysis_runs (
     PRIMARY KEY(event_id, analyzer_version)
 );
 
+CREATE INDEX IF NOT EXISTS idx_meaning_analysis_runs_version_status
+    ON meaning_analysis_runs(analyzer_version, status);
+
 CREATE TABLE IF NOT EXISTS query_meaning_cache (
     normalized_query   TEXT NOT NULL,
     analyzer_version   TEXT NOT NULL,
