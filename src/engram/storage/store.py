@@ -288,6 +288,25 @@ class EventStore:
         ).fetchall()
         return [str(row[0]) for row in rows]
 
+    def dirty_range_ids_for_owners(self, owners: list[str]) -> list[str]:
+        if not owners:
+            return []
+        placeholders = ",".join("?" for _ in owners)
+        rows = self._reader_conn.execute(
+            f"SELECT id FROM dirty_ranges WHERE owner_id IN ({placeholders})",
+            owners,
+        ).fetchall()
+        return [str(row["id"]) for row in rows]
+
+    def clear_dirty_range_ids(self, tx: sqlite3.Connection, range_ids: list[str]) -> None:
+        if not range_ids:
+            return
+        placeholders = ",".join("?" for _ in range_ids)
+        tx.execute(
+            f"DELETE FROM dirty_ranges WHERE id IN ({placeholders})",
+            range_ids,
+        )
+
     def clear_dirty_ranges_for_owners(
         self,
         tx: sqlite3.Connection,

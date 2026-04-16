@@ -68,6 +68,8 @@ class Projector:
         if not owners:
             return 0
 
+        captured_range_ids = self.store.dirty_range_ids_for_owners(owners)
+
         state = self._state
         new_snapshot = dict(state.entities)
         new_relation_snapshot = dict(state.relations)
@@ -75,7 +77,7 @@ class Projector:
             self._apply_owner_materialization(owner_id, new_snapshot, new_relation_snapshot)
 
         with self.store.transaction() as tx:
-            self.store.clear_dirty_ranges_for_owners(tx, owners)
+            self.store.clear_dirty_range_ids(tx, captured_range_ids)
 
         self._state = ProjectionState(
             entities=MappingProxyType(new_snapshot),
@@ -102,13 +104,15 @@ class Projector:
     def rebuild_all(self) -> int:
         state = self._state
         owners = sorted(set(self.store.all_entity_ids()) | set(state.entities.keys()) | set(state.relations.keys()))
+        captured_range_ids = self.store.dirty_range_ids_for_owners(owners)
+
         new_snapshot: dict[str, Entity] = {}
         new_relation_snapshot: dict[str, tuple[RelationEdge, ...]] = {}
         for owner_id in owners:
             self._apply_owner_materialization(owner_id, new_snapshot, new_relation_snapshot)
 
         with self.store.transaction() as tx:
-            self.store.clear_all_dirty_ranges(tx)
+            self.store.clear_dirty_range_ids(tx, captured_range_ids)
 
         self._state = ProjectionState(
             entities=MappingProxyType(new_snapshot),

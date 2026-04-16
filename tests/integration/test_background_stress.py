@@ -347,3 +347,37 @@ def test_projection_state_atomic_consistency(tmp_path):
 
     assert not errors, f"consistency errors: {errors}"
     mem.close()
+
+
+def test_rebuild_does_not_swallow_concurrent_dirty_rows(tmp_path):
+    mem = Engram(user_id="alice", path=str(tmp_path))
+    mem.append(
+        "entity.create",
+        {"id": "user:alice", "type": "user", "attrs": {"v": 1}},
+        observed_at=dt("2026-05-01T10:00:00Z"),
+    )
+
+    dirty_before = mem.store.count_dirty_ranges()
+    assert dirty_before > 0
+
+    captured_ids = mem.store.dirty_range_ids_for_owners(["user:alice"])
+
+    mem.append(
+        "entity.update",
+        {"id": "user:alice", "attrs": {"v": 2}},
+        observed_at=dt("2026-05-01T10:01:00Z"),
+    )
+
+    with mem.store.transaction() as tx:
+        mem.store.clear_dirty_range_ids(tx, captured_ids)
+
+    remaining = mem.store.count_dirty_ranges()
+    assert remaining > 0, "new dirty row from concurrent append must survive"
+
+    mem.flush("projection")
+    entity = mem.get("user:alice")
+    assert entity is not None
+    assert entity.attrs == {"v": 2}
+    assert mem.store.count_dirty_ranges() == 0
+
+    mem.close()
