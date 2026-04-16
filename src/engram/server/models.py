@@ -118,6 +118,48 @@ class AppendResponse(BaseModel):
     event_id: str
 
 
+class RelationHistoryEntryResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    entity_id: str
+    other_entity_id: str
+    relation_type: str
+    direction: Literal["outgoing", "incoming"]
+    action: Literal["create", "update", "delete"]
+    attrs: dict[str, Any]
+    observed_at: RFC3339DateTime
+    effective_at_start: RFC3339DateTime | None
+    effective_at_end: RFC3339DateTime | None
+    recorded_at: RFC3339DateTime
+    reason: str | None
+    confidence: float | None
+    basis: Literal["known", "valid"]
+    event_id: str
+
+
+class ProjectionRebuildResultResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    scope: Literal["dirty", "owner", "full"]
+    target_owner_id: str | None
+    rebuilt_owner_count: int
+    dirty_owner_count_before: int
+    dirty_owner_count_after: int
+
+
+class ReprocessRequest(BaseModel):
+    from_turn_id: str | None = None
+    to_turn_id: str | None = None
+    extractor_version: str | None = None
+
+
+class RebuildProjectionRequest(BaseModel):
+    owner_id: str | None = None
+    mode: Literal["dirty", "full"] = "dirty"
+
+
+class ReprocessResponse(BaseModel):
+    count: int
+
+
 class HealthResponse(BaseModel):
     status: Literal["ok"] = "ok"
     user_id: str

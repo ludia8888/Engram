@@ -191,3 +191,53 @@ def test_raw_get_404(tmp_path):
     with _client(tmp_path) as client:
         resp = client.get("/raw/nonexistent-id")
         assert resp.status_code == 404
+
+
+def test_search_rejects_non_positive_k(tmp_path):
+    with _client(tmp_path) as client:
+        resp = client.get("/search?query=test&k=0")
+        assert resp.status_code == 422
+
+        resp2 = client.get("/search?query=test&k=-1")
+        assert resp2.status_code == 422
+
+
+def test_relation_history_endpoint(tmp_path):
+    with _client(tmp_path) as client:
+        client.post("/append", json={
+            "event_type": "entity.create",
+            "data": {"id": "user:alice", "type": "user", "attrs": {}},
+            "observed_at": "2026-05-01T10:00:00Z",
+        })
+        client.post("/append", json={
+            "event_type": "entity.create",
+            "data": {"id": "person:bob", "type": "person", "attrs": {}},
+            "observed_at": "2026-05-01T10:00:00Z",
+        })
+        client.post("/append", json={
+            "event_type": "relation.create",
+            "data": {"source": "user:alice", "target": "person:bob", "type": "friend", "attrs": {"since": "2026"}},
+            "observed_at": "2026-05-01T10:00:00Z",
+        })
+
+        resp = client.get("/entity/user:alice/relation-history")
+        assert resp.status_code == 200
+        entries = resp.json()
+        assert len(entries) == 1
+        assert entries[0]["relation_type"] == "friend"
+        assert entries[0]["action"] == "create"
+
+
+def test_rebuild_projection_endpoint(tmp_path):
+    with _client(tmp_path) as client:
+        client.post("/append", json={
+            "event_type": "entity.create",
+            "data": {"id": "user:alice", "type": "user", "attrs": {"v": 1}},
+            "observed_at": "2026-05-01T10:00:00Z",
+        })
+
+        resp = client.post("/rebuild-projection", json={"mode": "dirty"})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["rebuilt_owner_count"] >= 1
+        assert body["dirty_owner_count_after"] == 0

@@ -13,8 +13,13 @@ from .models import (
     FlushRequest,
     HealthResponse,
     HistoryEntryResponse,
+    ProjectionRebuildResultResponse,
     RawTurnResponse,
+    RebuildProjectionRequest,
     RelationEdgeResponse,
+    RelationHistoryEntryResponse,
+    ReprocessRequest,
+    ReprocessResponse,
     SearchResultResponse,
     TemporalEntityViewResponse,
     TurnAckResponse,
@@ -144,15 +149,6 @@ def get_relations(
     return [RelationEdgeResponse.model_validate(e) for e in edges]
 
 
-@router.get("/entity/{entity_id:path}")
-def get_entity(request: Request, entity_id: str) -> EntityResponse:
-    mem = _engram(request)
-    entity = mem.get(entity_id)
-    if entity is None:
-        raise HTTPException(404, detail=f"Entity not found: {entity_id}")
-    return EntityResponse.model_validate(entity)
-
-
 @router.get("/search")
 def search(
     request: Request,
@@ -160,7 +156,7 @@ def search(
     time_mode: Literal["known", "valid"] = "known",
     time_window_start: str | None = None,
     time_window_end: str | None = None,
-    k: int = 20,
+    k: int = Query(default=20, ge=1),
 ) -> list[SearchResultResponse]:
     mem = _engram(request)
     tw_start = _parse_dt(time_window_start, "time_window_start")
@@ -179,7 +175,7 @@ def context(
     time_mode: Literal["known", "valid"] = "known",
     time_window_start: str | None = None,
     time_window_end: str | None = None,
-    max_tokens: int = 2000,
+    max_tokens: int = Query(default=2000, ge=1),
     include_history: bool = True,
     include_raw: bool = False,
 ):
@@ -198,6 +194,51 @@ def context(
         include_raw=include_raw,
     )
     return Response(content=text, media_type="text/plain")
+
+
+@router.get("/entity/{entity_id:path}/relation-history")
+def relation_history(
+    request: Request,
+    entity_id: str,
+    relation_type: str | None = None,
+    other_entity_id: str | None = None,
+    time_mode: Literal["known", "valid"] = "known",
+) -> list[RelationHistoryEntryResponse]:
+    mem = _engram(request)
+    entries = mem.relation_history(
+        entity_id,
+        relation_type=relation_type,
+        other_entity_id=other_entity_id,
+        time_mode=time_mode,
+    )
+    return [RelationHistoryEntryResponse.model_validate(e) for e in entries]
+
+
+@router.get("/entity/{entity_id:path}")
+def get_entity(request: Request, entity_id: str) -> EntityResponse:
+    mem = _engram(request)
+    entity = mem.get(entity_id)
+    if entity is None:
+        raise HTTPException(404, detail=f"Entity not found: {entity_id}")
+    return EntityResponse.model_validate(entity)
+
+
+@router.post("/reprocess")
+def reprocess(request: Request, body: ReprocessRequest) -> ReprocessResponse:
+    mem = _engram(request)
+    count = mem.reprocess(
+        from_turn_id=body.from_turn_id,
+        to_turn_id=body.to_turn_id,
+        extractor_version=body.extractor_version,
+    )
+    return ReprocessResponse(count=count)
+
+
+@router.post("/rebuild-projection")
+def rebuild_projection(request: Request, body: RebuildProjectionRequest) -> ProjectionRebuildResultResponse:
+    mem = _engram(request)
+    result = mem.rebuild_projection(owner_id=body.owner_id, mode=body.mode)
+    return ProjectionRebuildResultResponse.model_validate(result)
 
 
 @router.post("/flush")
