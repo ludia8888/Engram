@@ -58,22 +58,56 @@ def open_connection(db_path: Path) -> sqlite3.Connection:
     return conn
 
 
+def open_reader_connection(db_path: Path) -> sqlite3.Connection:
+    uri = f"file:{db_path}?mode=ro"
+    conn = sqlite3.connect(uri, uri=True, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode = WAL;")
+    conn.execute("PRAGMA foreign_keys = ON;")
+    conn.execute("PRAGMA busy_timeout = 5000;")
+    return conn
+
+
 class EventStore:
-    def __init__(self, conn: sqlite3.Connection):
-        self.conn = conn
+    def __init__(self, conn: sqlite3.Connection, db_path: Path | None = None):
+        self._writer_conn = conn
+        self._db_path = db_path
         self._tx_lock = threading.Lock()
+        self._thread_local = threading.local()
+
+    @property
+    def conn(self) -> sqlite3.Connection:
+        return self._writer_conn
+
+    @property
+    def _reader_conn(self) -> sqlite3.Connection:
+        if self._db_path is None:
+            return self._writer_conn
+        local = self._thread_local
+        reader = getattr(local, "reader_conn", None)
+        if reader is None:
+            reader = open_reader_connection(self._db_path)
+            local.reader_conn = reader
+        return reader
 
     @contextmanager
     def transaction(self):
         with self._tx_lock:
-            self.conn.execute("BEGIN IMMEDIATE")
+            self._writer_conn.execute("BEGIN IMMEDIATE")
             try:
-                yield self.conn
+                yield self._writer_conn
             except Exception:
-                self.conn.rollback()
+                self._writer_conn.rollback()
                 raise
             else:
-                self.conn.commit()
+                self._writer_conn.commit()
+
+    def event_exists_in_tx(self, tx: sqlite3.Connection, event_id: str) -> bool:
+        row = tx.execute(
+            "SELECT 1 FROM events WHERE id = ? LIMIT 1",
+            (event_id,),
+        ).fetchone()
+        return row is not None
 
     def next_seq(self, tx: sqlite3.Connection) -> int:
         row = tx.execute("SELECT COALESCE(MAX(seq), 0) + 1 FROM events").fetchone()
@@ -138,37 +172,37 @@ class EventStore:
         )
 
     def count_events(self) -> int:
-        row = self.conn.execute("SELECT COUNT(*) FROM events").fetchone()
+        row = self._reader_conn.execute("SELECT COUNT(*) FROM events").fetchone()
         return int(row[0])
 
     def count_extraction_runs(self) -> int:
-        row = self.conn.execute("SELECT COUNT(*) FROM extraction_runs").fetchone()
+        row = self._reader_conn.execute("SELECT COUNT(*) FROM extraction_runs").fetchone()
         return int(row[0])
 
     def count_dirty_ranges(self) -> int:
-        row = self.conn.execute("SELECT COUNT(*) FROM dirty_ranges").fetchone()
+        row = self._reader_conn.execute("SELECT COUNT(*) FROM dirty_ranges").fetchone()
         return int(row[0])
 
     def count_vec_events(self, embedder_version: str | None = None) -> int:
         if embedder_version is None:
-            row = self.conn.execute("SELECT COUNT(*) FROM vec_events").fetchone()
+            row = self._reader_conn.execute("SELECT COUNT(*) FROM vec_events").fetchone()
         else:
-            row = self.conn.execute(
+            row = self._reader_conn.execute(
                 "SELECT COUNT(*) FROM vec_events WHERE embedder_version = ?",
                 (embedder_version,),
             ).fetchone()
         return int(row[0])
 
     def count_event_search_terms(self) -> int:
-        row = self.conn.execute("SELECT COUNT(*) FROM event_search_terms").fetchone()
+        row = self._reader_conn.execute("SELECT COUNT(*) FROM event_search_terms").fetchone()
         return int(row[0])
 
     def current_max_seq(self) -> int:
-        row = self.conn.execute("SELECT COALESCE(MAX(seq), 0) FROM events").fetchone()
+        row = self._reader_conn.execute("SELECT COALESCE(MAX(seq), 0) FROM events").fetchone()
         return int(row[0])
 
     def max_recorded_at_for_seq(self, last_seq: int) -> str | None:
-        row = self.conn.execute(
+        row = self._reader_conn.execute(
             "SELECT MAX(recorded_at) FROM events WHERE seq <= ?",
             (last_seq,),
         ).fetchone()
@@ -197,7 +231,7 @@ class EventStore:
         )
 
     def load_latest_snapshot(self) -> SnapshotRow | None:
-        row = self.conn.execute(
+        row = self._reader_conn.execute(
             """
             SELECT * FROM snapshots
             ORDER BY last_seq DESC
@@ -238,14 +272,14 @@ class EventStore:
         return len(ids)
 
     def event_exists(self, event_id: str) -> bool:
-        row = self.conn.execute(
+        row = self._reader_conn.execute(
             "SELECT 1 FROM events WHERE id = ? LIMIT 1",
             (event_id,),
         ).fetchone()
         return row is not None
 
     def dirty_owner_ids(self) -> list[str]:
-        rows = self.conn.execute(
+        rows = self._reader_conn.execute(
             """
             SELECT DISTINCT owner_id
             FROM dirty_ranges
@@ -271,7 +305,7 @@ class EventStore:
         tx.execute("DELETE FROM dirty_ranges")
 
     def all_entity_ids(self) -> list[str]:
-        rows = self.conn.execute(
+        rows = self._reader_conn.execute(
             """
             SELECT DISTINCT entity_id
             FROM event_entities
@@ -281,7 +315,7 @@ class EventStore:
         return [str(row[0]) for row in rows]
 
     def events_missing_embeddings(self, embedder_version: str) -> list[Event]:
-        rows = self.conn.execute(
+        rows = self._reader_conn.execute(
             """
             SELECT e.*
             FROM events e
@@ -315,7 +349,7 @@ class EventStore:
         )
 
     def events_missing_search_terms(self) -> list[Event]:
-        rows = self.conn.execute(
+        rows = self._reader_conn.execute(
             """
             SELECT e.*
             FROM events e
@@ -346,7 +380,7 @@ class EventStore:
         if not terms:
             return []
         placeholders = ",".join("?" for _ in terms)
-        rows = self.conn.execute(
+        rows = self._reader_conn.execute(
             f"""
             SELECT DISTINCT event_id
             FROM event_search_terms
@@ -358,7 +392,7 @@ class EventStore:
         return [str(row["event_id"]) for row in rows]
 
     def event_ids_with_embeddings(self, embedder_version: str) -> list[str]:
-        rows = self.conn.execute(
+        rows = self._reader_conn.execute(
             """
             SELECT event_id
             FROM vec_events
@@ -373,7 +407,7 @@ class EventStore:
         if not caused_by_ids:
             return []
         placeholders = ",".join("?" for _ in caused_by_ids)
-        rows = self.conn.execute(
+        rows = self._reader_conn.execute(
             f"""
             SELECT id
             FROM events
@@ -385,7 +419,7 @@ class EventStore:
         return [str(row["id"]) for row in rows]
 
     def successful_source_turn_ids(self, extractor_version: str) -> set[str]:
-        rows = self.conn.execute(
+        rows = self._reader_conn.execute(
             """
             SELECT DISTINCT source_turn_id
             FROM extraction_runs
@@ -399,7 +433,7 @@ class EventStore:
         return {str(row[0]) for row in rows}
 
     def count_failed_runs_for_turn(self, source_turn_id: str, extractor_version: str) -> int:
-        row = self.conn.execute(
+        row = self._reader_conn.execute(
             """
             SELECT COUNT(*)
             FROM extraction_runs
@@ -412,7 +446,7 @@ class EventStore:
         return int(row[0])
 
     def has_successful_extraction_run(self, source_turn_id: str, extractor_version: str) -> bool:
-        row = self.conn.execute(
+        row = self._reader_conn.execute(
             """
             SELECT 1
             FROM extraction_runs
@@ -427,7 +461,7 @@ class EventStore:
         return row is not None
 
     def active_successful_runs_for_turn(self, source_turn_id: str) -> list[ExtractionRun]:
-        rows = self.conn.execute(
+        rows = self._reader_conn.execute(
             """
             SELECT *
             FROM extraction_runs
@@ -469,7 +503,7 @@ class EventStore:
         )
 
     def list_superseded_runs(self) -> list[dict[str, str]]:
-        rows = self.conn.execute(
+        rows = self._reader_conn.execute(
             """
             SELECT old_run_id, new_run_id, superseded_at
             FROM superseded_runs
@@ -489,7 +523,7 @@ class EventStore:
         if not run_ids:
             return []
         placeholders = ",".join("?" for _ in run_ids)
-        rows = self.conn.execute(
+        rows = self._reader_conn.execute(
             f"""
             SELECT DISTINCT ee.entity_id
             FROM event_entities ee
@@ -502,7 +536,7 @@ class EventStore:
         return [str(row[0]) for row in rows]
 
     def related_owner_ids_for_entity(self, entity_id: str) -> list[str]:
-        rows = self.conn.execute(
+        rows = self._reader_conn.execute(
             """
             SELECT DISTINCT CASE
                 WHEN json_extract(e.data, '$.source') = ? THEN json_extract(e.data, '$.target')
@@ -551,7 +585,7 @@ class EventStore:
         )
 
     def list_extraction_runs(self) -> list[ExtractionRun]:
-        rows = self.conn.execute(
+        rows = self._reader_conn.execute(
             """
             SELECT *
             FROM extraction_runs
@@ -561,7 +595,7 @@ class EventStore:
         return [self._row_to_run(row) for row in rows]
 
     def entity_events_known_visible_at(self, entity_id: str, recorded_at: str) -> list[Event]:
-        rows = self.conn.execute(
+        rows = self._reader_conn.execute(
             """
             SELECT DISTINCT e.*
             FROM events e
@@ -591,7 +625,7 @@ class EventStore:
         if not entity_ids:
             return {}
         placeholders = ",".join("?" for _ in entity_ids)
-        rows = self.conn.execute(
+        rows = self._reader_conn.execute(
             f"""
             SELECT ee.entity_id AS lookup_entity_id, e.*
             FROM events e
@@ -617,7 +651,7 @@ class EventStore:
         return grouped
 
     def entity_events_valid_visible(self, entity_id: str) -> list[Event]:
-        rows = self.conn.execute(
+        rows = self._reader_conn.execute(
             """
             SELECT DISTINCT e.*
             FROM events e
@@ -641,7 +675,7 @@ class EventStore:
         if not entity_ids:
             return {}
         placeholders = ",".join("?" for _ in entity_ids)
-        rows = self.conn.execute(
+        rows = self._reader_conn.execute(
             f"""
             SELECT ee.entity_id AS lookup_entity_id, e.*
             FROM events e
@@ -668,7 +702,7 @@ class EventStore:
         return self.entity_events_valid_visible(entity_id)
 
     def entity_events(self, entity_id: str) -> list[Event]:
-        rows = self.conn.execute(
+        rows = self._reader_conn.execute(
             """
             SELECT DISTINCT e.*
             FROM events e
@@ -693,7 +727,7 @@ class EventStore:
             event_filter = f" AND events.id IN ({placeholders})"
             params.extend(event_ids)
         if from_recorded_at is None:
-            rows = self.conn.execute(
+            rows = self._reader_conn.execute(
                 f"""
                 SELECT events.*
                 FROM events
@@ -713,7 +747,7 @@ class EventStore:
                 (recorded_at, *params, recorded_at, recorded_at),
             ).fetchall()
         else:
-            rows = self.conn.execute(
+            rows = self._reader_conn.execute(
                 f"""
                 SELECT events.*
                 FROM events
@@ -742,7 +776,7 @@ class EventStore:
             placeholders = ",".join("?" for _ in event_ids)
             event_filter = f" AND events.id IN ({placeholders})"
             params.extend(event_ids)
-        rows = self.conn.execute(
+        rows = self._reader_conn.execute(
             f"""
             SELECT events.*
             FROM events
@@ -765,7 +799,7 @@ class EventStore:
         if not event_ids:
             return {}
         placeholders = ",".join("?" for _ in event_ids)
-        rows = self.conn.execute(
+        rows = self._reader_conn.execute(
             f"""
             SELECT event_id, entity_id
             FROM event_entities
@@ -783,7 +817,7 @@ class EventStore:
         if not event_ids:
             return []
         placeholders = ",".join("?" for _ in event_ids)
-        rows = self.conn.execute(
+        rows = self._reader_conn.execute(
             f"""
             SELECT *
             FROM events
@@ -795,7 +829,7 @@ class EventStore:
         return [self._row_to_event(row) for row in rows]
 
     def event_by_id(self, event_id: str) -> Event | None:
-        row = self.conn.execute(
+        row = self._reader_conn.execute(
             """
             SELECT *
             FROM events
@@ -817,7 +851,7 @@ class EventStore:
         if not event_ids:
             return {}
         placeholders = ",".join("?" for _ in event_ids)
-        rows = self.conn.execute(
+        rows = self._reader_conn.execute(
             f"""
             SELECT event_id, dim, embedding
             FROM vec_events
@@ -841,7 +875,7 @@ class EventStore:
         if not entity_ids:
             return []
         placeholders = ",".join("?" for _ in entity_ids)
-        rows = self.conn.execute(
+        rows = self._reader_conn.execute(
             f"""
             SELECT DISTINCT ee.event_id
             FROM event_entities ee
