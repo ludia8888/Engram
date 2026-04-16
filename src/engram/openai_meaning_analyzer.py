@@ -10,7 +10,7 @@ from .search_terms import query_candidate_terms
 from .semantic import _default_openai_space_id, _load_openai_client_class
 from .types import Event, MeaningAnalysis, MeaningUnit, QueryMeaningPlan
 
-_OPENAI_DEFAULT_MODEL = "gpt-4o-mini"
+_OPENAI_DEFAULT_MODEL = "gpt-5.4-mini"
 _ALLOWED_UNIT_KINDS = {"protected_phrase", "alias", "canonical_key", "facet"}
 
 
