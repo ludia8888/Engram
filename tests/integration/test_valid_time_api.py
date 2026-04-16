@@ -144,3 +144,29 @@ def test_get_valid_at_returns_unknown_attrs_even_without_active_state(tmp_path):
     assert view.basis == "valid"
 
     mem.close()
+
+
+def test_get_valid_at_does_not_leak_future_entity_type(tmp_path):
+    mem = Engram(user_id="alice", path=str(tmp_path))
+    mem.append(
+        "entity.create",
+        {"id": "user:alice", "type": "user", "attrs": {"location": "Seoul"}},
+        observed_at=dt("2026-05-01T10:00:00Z"),
+        effective_at_start=dt("2026-05-01T00:00:00Z"),
+        time_confidence="exact",
+    )
+    mem.append(
+        "entity.create",
+        {"id": "user:alice", "type": "robot", "attrs": {"model": "R1"}},
+        observed_at=dt("2026-06-01T10:00:00Z"),
+        effective_at_start=dt("2026-06-01T00:00:00Z"),
+        time_confidence="exact",
+    )
+
+    view = mem.get_valid_at("user:alice", dt("2026-05-15T12:00:00Z"))
+
+    assert view is not None
+    assert view.entity_type == "user"
+    assert view.attrs == {"location": "Seoul"}
+
+    mem.close()

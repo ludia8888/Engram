@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, PlainSerializer, field_validator
+from pydantic import BaseModel, ConfigDict, Field, PlainSerializer, field_validator
 
 from engram.time_utils import to_rfc3339
 
@@ -27,7 +27,7 @@ class AppendRequest(BaseModel):
     source_role: str = "manual"
     source_turn_id: str | None = None
     caused_by: str | None = None
-    confidence: float | None = None
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     reason: str | None = None
     time_confidence: str = "unknown"
 

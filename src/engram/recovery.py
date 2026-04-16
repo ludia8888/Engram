@@ -4,6 +4,7 @@ import queue
 
 from .errors import QueueFullError
 from .projector import Projector
+from .semantic_index import SemanticIndexer
 from .storage.raw_log import SegmentedRawLog
 from .storage.store import EventStore
 from .types import QueueItem
@@ -15,6 +16,7 @@ class RecoveryService:
         raw_log: SegmentedRawLog,
         store: EventStore,
         projector: Projector,
+        semantic_indexer: SemanticIndexer,
         work_queue: queue.Queue[QueueItem],
         queue_put_timeout: float,
         extractor_version: str,
@@ -22,6 +24,7 @@ class RecoveryService:
         self.raw_log = raw_log
         self.store = store
         self.projector = projector
+        self.semantic_indexer = semantic_indexer
         self.work_queue = work_queue
         self.queue_put_timeout = queue_put_timeout
         self.extractor_version = extractor_version
@@ -39,6 +42,8 @@ class RecoveryService:
                 rebuilt = self.projector.rebuild_dirty()
                 if rebuilt == 0 and self.store.count_dirty_ranges() > 0:
                     raise RuntimeError("startup projection recovery made no progress")
+
+        self.semantic_indexer.index_missing()
 
         processed_turn_ids = self.store.successful_source_turn_ids(self.extractor_version)
         enqueued = 0

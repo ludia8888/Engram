@@ -64,7 +64,7 @@ def health(request: Request) -> HealthResponse:
     )
 
 
-@router.post("/turn")
+@router.post("/turn", status_code=201)
 def create_turn(request: Request, body: TurnRequest) -> TurnAckResponse:
     mem = _engram(request)
     ack = mem.turn(
@@ -77,7 +77,7 @@ def create_turn(request: Request, body: TurnRequest) -> TurnAckResponse:
     return TurnAckResponse.model_validate(ack)
 
 
-@router.post("/append")
+@router.post("/append", status_code=201)
 def append_event(request: Request, body: AppendRequest) -> AppendResponse:
     mem = _engram(request)
     event_id = mem.append(

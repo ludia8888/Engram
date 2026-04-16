@@ -257,3 +257,21 @@ def test_stale_snapshot_with_no_dirty_ranges_still_rebuilds(tmp_path):
     assert snapshot_after["user:alice"].attrs == {"diet": "vegetarian", "location": "Busan"}
 
     second.close()
+
+
+def test_startup_recovery_backfills_missing_semantic_index_rows(tmp_path):
+    first = Engram(user_id="alice", path=str(tmp_path))
+    first.append(
+        "entity.create",
+        {"id": "user:alice", "type": "user", "attrs": {"location": "Busan"}},
+        observed_at=dt("2026-05-01T10:00:00Z"),
+        reason="moved to Busan",
+    )
+    assert first.store.count_vec_events(first.embedder.version) == 0
+    first.close()
+
+    second = Engram(user_id="alice", path=str(tmp_path))
+
+    assert second.store.count_vec_events(second.embedder.version) >= 1
+
+    second.close()
