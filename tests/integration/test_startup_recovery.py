@@ -219,3 +219,41 @@ def test_corrupt_snapshot_does_not_block_startup(tmp_path):
     assert view.attrs == {"diet": "vegetarian"}
 
     second.close()
+
+
+def test_stale_snapshot_with_no_dirty_ranges_still_rebuilds(tmp_path):
+    first = Engram(user_id="alice", path=str(tmp_path))
+    first.append(
+        "entity.create",
+        {"id": "user:alice", "type": "user", "attrs": {"diet": "vegetarian"}},
+        observed_at=dt("2026-05-01T10:00:00Z"),
+    )
+    first.flush("all")
+
+    snapshot = first.store.load_latest_snapshot()
+    assert snapshot is not None
+    stale_seq = snapshot.last_seq
+
+    first.append(
+        "entity.update",
+        {"id": "user:alice", "attrs": {"location": "Busan"}},
+        observed_at=dt("2026-05-01T11:00:00Z"),
+    )
+    first.flush("projection")
+
+    assert first.store.count_dirty_ranges() == 0
+    assert first.store.current_max_seq() > stale_seq
+    first.close()
+
+    second = Engram(user_id="alice", path=str(tmp_path))
+
+    assert second.store.count_dirty_ranges() == 0
+    view = second.get("user:alice")
+    assert view is not None
+    assert view.attrs == {"diet": "vegetarian", "location": "Busan"}
+
+    snapshot_after = second.projector.current_snapshot()
+    assert "user:alice" in snapshot_after
+    assert snapshot_after["user:alice"].attrs == {"diet": "vegetarian", "location": "Busan"}
+
+    second.close()

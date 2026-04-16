@@ -16,9 +16,14 @@ class Projector:
         self._snapshot: Mapping[str, Entity] = MappingProxyType({})
         self._relation_snapshot: Mapping[str, tuple[RelationEdge, ...]] = MappingProxyType({})
         self._projection_version: int = 0
+        self._snapshot_last_seq: int = 0
 
     def current_snapshot(self) -> Mapping[str, Entity]:
         return self._snapshot
+
+    @property
+    def snapshot_last_seq(self) -> int:
+        return self._snapshot_last_seq
 
     def current_relation_snapshot(self) -> Mapping[str, tuple[RelationEdge, ...]]:
         return self._relation_snapshot
@@ -139,4 +144,5 @@ class Projector:
         self._snapshot = MappingProxyType(entities)
         self._relation_snapshot = MappingProxyType(relations)
         self._projection_version = row.projection_version
+        self._snapshot_last_seq = row.last_seq
         return True
