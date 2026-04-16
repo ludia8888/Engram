@@ -11,6 +11,7 @@ from .canonical import CanonicalWorker, Extractor, NullExtractor
 from .context_builder import ContextBuilder
 from .errors import ValidationError
 from .event_ops import derive_cascade_dirty_rows_for_entity_event, derive_dirty_rows, derive_event_entities, validate_event
+from .meaning_index import MeaningIndexer, NullMeaningAnalyzer
 from .projector import Projector
 from .recovery import RecoveryService
 from .retrieval import RetrievalEngine
@@ -64,6 +65,7 @@ class Engram:
         self.queue_put_timeout = queue_put_timeout
         self.extractor = extractor or NullExtractor()
         self.embedder = embedder or HashEmbedder()
+        self.meaning_analyzer = NullMeaningAnalyzer()
 
         self._writer_lock = WriterLock(self.root / ".writer.lock")
         self.conn = None
@@ -77,6 +79,7 @@ class Engram:
             self.projector = Projector(self.store)
             self.canonical_worker = CanonicalWorker(self.store, self.extractor)
             self.semantic_indexer = SemanticIndexer(self.store, self.embedder)
+            self.meaning_indexer = MeaningIndexer(self.store, self.meaning_analyzer)
             self.retrieval = RetrievalEngine(self.store, self.embedder)
             self.context_builder = ContextBuilder(self.store, self.raw_log.raw_get)
             self.queue: queue.Queue[QueueItem] = queue.Queue(maxsize=queue_max_size)
@@ -85,6 +88,7 @@ class Engram:
                 store=self.store,
                 projector=self.projector,
                 semantic_indexer=self.semantic_indexer,
+                meaning_indexer=self.meaning_indexer,
                 work_queue=self.queue,
                 queue_put_timeout=self.queue_put_timeout,
                 extractor_version=self.extractor.version,
@@ -98,6 +102,7 @@ class Engram:
                     canonical_worker=self.canonical_worker,
                     projector=self.projector,
                     semantic_indexer=self.semantic_indexer,
+                    meaning_indexer=self.meaning_indexer,
                     retry_policy=RetryPolicy(),
                 )
                 self._background_worker.start()
@@ -665,6 +670,7 @@ class Engram:
             return False
         if level == "index":
             self.semantic_indexer.index_missing()
+            self.meaning_indexer.index_missing()
             return False
         if level == "all":
             processed_canonical = self._flush_internal("canonical")

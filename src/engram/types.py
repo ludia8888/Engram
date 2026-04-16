@@ -9,6 +9,7 @@ SourceRole = Literal["user", "assistant", "tool", "system", "manual"]
 TimeConfidence = Literal["exact", "inferred", "unknown"]
 ExtractionRunStatus = Literal["SUCCEEDED", "FAILED", "SKIPPED"]
 RelationDirection = Literal["outgoing", "incoming"]
+MeaningUnitKind = Literal["protected_phrase", "alias", "canonical_key", "facet", "fallback_term"]
 
 
 @dataclass(slots=True)
@@ -81,6 +82,28 @@ class ExtractedEvent:
     confidence: float | None = None
     reason: str | None = None
     time_confidence: TimeConfidence = "unknown"
+
+
+@dataclass(slots=True)
+class MeaningUnit:
+    kind: MeaningUnitKind
+    value: str
+    normalized_value: str
+    key: str | None = None
+    confidence: float | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class MeaningAnalysis:
+    units: list[MeaningUnit]
+
+
+@dataclass(slots=True)
+class QueryMeaningPlan:
+    units: list[MeaningUnit]
+    fallback_terms: list[str]
+    planner_confidence: float | None = None
 
 
 @dataclass(slots=True)
@@ -188,3 +211,13 @@ class RelationEdge:
     other_entity_id: str
     direction: RelationDirection
     attrs: dict[str, Any]
+
+
+@dataclass(slots=True)
+class MeaningAnalysisRun:
+    event_id: str
+    analyzer_version: str
+    processed_at: datetime
+    status: ExtractionRunStatus
+    error: str | None
+    unit_count: int

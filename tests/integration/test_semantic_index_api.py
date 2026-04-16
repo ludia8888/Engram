@@ -110,6 +110,24 @@ def test_flush_index_backfills_vec_events_for_current_embedder_version(tmp_path)
     mem.close()
 
 
+def test_flush_index_backfills_meaning_units_for_current_analyzer_version(tmp_path):
+    mem = Engram(user_id="alice", path=str(tmp_path))
+    mem.append(
+        "entity.create",
+        {"id": "user:alice", "type": "user", "attrs": {"location": "Busan-1499", "tag": "traveler"}},
+        observed_at=dt("2026-05-01T10:00:00Z"),
+        reason="moved to Busan-1499",
+    )
+
+    assert mem.store.count_event_search_units("meaning-null-v1") == 0
+
+    mem.flush("index")
+
+    assert mem.store.count_event_search_units("meaning-null-v1") > 0
+
+    mem.close()
+
+
 def test_startup_recovery_backfills_new_static_embedder_version_rows(tmp_path):
     first = Engram(
         user_id="alice",

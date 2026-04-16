@@ -97,3 +97,42 @@ CREATE TABLE IF NOT EXISTS event_search_terms (
 );
 
 CREATE INDEX IF NOT EXISTS idx_event_search_terms_term ON event_search_terms(term);
+
+CREATE TABLE IF NOT EXISTS event_search_units (
+    event_id           TEXT NOT NULL,
+    analyzer_version   TEXT NOT NULL,
+    unit_kind          TEXT NOT NULL CHECK(unit_kind IN ('protected_phrase', 'alias', 'canonical_key', 'facet', 'fallback_term')),
+    unit_key           TEXT NOT NULL DEFAULT '',
+    unit_value         TEXT NOT NULL,
+    normalized_value   TEXT NOT NULL,
+    confidence         REAL,
+    metadata           TEXT CHECK(metadata IS NULL OR json_valid(metadata)),
+    PRIMARY KEY(event_id, analyzer_version, unit_kind, unit_key, normalized_value)
+);
+
+CREATE INDEX IF NOT EXISTS idx_event_search_units_lookup
+    ON event_search_units(analyzer_version, unit_kind, normalized_value);
+
+CREATE INDEX IF NOT EXISTS idx_event_search_units_facet_lookup
+    ON event_search_units(analyzer_version, unit_kind, unit_key, normalized_value);
+
+CREATE INDEX IF NOT EXISTS idx_event_search_units_event
+    ON event_search_units(event_id, analyzer_version);
+
+CREATE TABLE IF NOT EXISTS meaning_analysis_runs (
+    event_id           TEXT NOT NULL,
+    analyzer_version   TEXT NOT NULL,
+    processed_at       TEXT NOT NULL,
+    status             TEXT NOT NULL CHECK(status IN ('SUCCEEDED', 'FAILED', 'SKIPPED')),
+    error              TEXT,
+    unit_count         INTEGER NOT NULL,
+    PRIMARY KEY(event_id, analyzer_version)
+);
+
+CREATE TABLE IF NOT EXISTS query_meaning_cache (
+    normalized_query   TEXT NOT NULL,
+    analyzer_version   TEXT NOT NULL,
+    payload            TEXT NOT NULL CHECK(json_valid(payload)),
+    cached_at          TEXT NOT NULL,
+    PRIMARY KEY(normalized_query, analyzer_version)
+);

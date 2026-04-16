@@ -7,6 +7,7 @@ import threading
 import time
 
 from .canonical import CanonicalWorker
+from .meaning_index import MeaningIndexer
 from .projector import Projector
 from .retry import RetryPolicy
 from .semantic_index import SemanticIndexer
@@ -24,6 +25,7 @@ class BackgroundWorker:
         canonical_worker: CanonicalWorker,
         projector: Projector,
         semantic_indexer: SemanticIndexer,
+        meaning_indexer: MeaningIndexer,
         retry_policy: RetryPolicy,
         drain_timeout: float = 0.5,
     ):
@@ -31,6 +33,7 @@ class BackgroundWorker:
         self._canonical = canonical_worker
         self._projector = projector
         self._indexer = semantic_indexer
+        self._meaning_indexer = meaning_indexer
         self._retry_policy = retry_policy
         self._drain_timeout = drain_timeout
         self._stop_event = threading.Event()
@@ -152,6 +155,14 @@ class BackgroundWorker:
                 logger.info("semantic index: indexed=%d in %.3fs", indexed, elapsed)
         except Exception:
             logger.exception("semantic indexing failed")
+        try:
+            t0 = time.monotonic()
+            meaning_indexed = self._meaning_indexer.index_missing()
+            elapsed = time.monotonic() - t0
+            if meaning_indexed > 0:
+                logger.info("meaning index: indexed=%d events in %.3fs", meaning_indexed, elapsed)
+        except Exception:
+            logger.exception("meaning indexing failed")
 
     def _maintenance_target(self) -> int:
         with self._cond:

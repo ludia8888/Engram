@@ -11,7 +11,7 @@ from typing import Any, TypeAlias
 
 from engram.semantic import embedding_from_blob
 from engram.time_utils import from_rfc3339, to_rfc3339, utcnow
-from engram.types import Entity, Event, ExtractionRun, RelationEdge, SnapshotRow
+from engram.types import Entity, Event, ExtractionRun, MeaningAnalysisRun, RelationEdge, SnapshotRow
 
 from .entity_fold import (
     FoldedEntityState,
@@ -210,6 +210,16 @@ class EventStore:
         row = self._reader_conn.execute("SELECT COUNT(*) FROM event_search_terms").fetchone()
         return int(row[0])
 
+    def count_event_search_units(self, analyzer_version: str | None = None) -> int:
+        if analyzer_version is None:
+            row = self._reader_conn.execute("SELECT COUNT(*) FROM event_search_units").fetchone()
+        else:
+            row = self._reader_conn.execute(
+                "SELECT COUNT(*) FROM event_search_units WHERE analyzer_version = ?",
+                (analyzer_version,),
+            ).fetchone()
+        return int(row[0])
+
     def current_max_seq(self) -> int:
         row = self._reader_conn.execute("SELECT COALESCE(MAX(seq), 0) FROM events").fetchone()
         return int(row[0])
@@ -406,6 +416,88 @@ class EventStore:
             VALUES (?, ?)
             """,
             [(event_id, term) for term in terms],
+        )
+
+    def events_missing_search_units(self, analyzer_version: str) -> list[Event]:
+        rows = self._reader_conn.execute(
+            """
+            SELECT e.*
+            FROM events e
+            LEFT JOIN meaning_analysis_runs r
+              ON r.event_id = e.id
+             AND r.analyzer_version = ?
+             AND r.status = 'SUCCEEDED'
+            WHERE r.event_id IS NULL
+            ORDER BY e.seq ASC
+            """,
+            (analyzer_version,),
+        ).fetchall()
+        return [self._row_to_event(row) for row in rows]
+
+    def replace_event_search_units(
+        self,
+        tx: sqlite3.Connection,
+        analyzer_version: str,
+        rows: list[tuple[str, str, str, str | None, str, str, float | None, str | None]],
+    ) -> None:
+        if not rows:
+            return
+        event_ids = sorted({event_id for event_id, *_ in rows})
+        placeholders = ",".join("?" for _ in event_ids)
+        tx.execute(
+            f"""
+            DELETE FROM event_search_units
+            WHERE analyzer_version = ?
+              AND event_id IN ({placeholders})
+            """,
+            [analyzer_version, *event_ids],
+        )
+        tx.executemany(
+            """
+            INSERT OR REPLACE INTO event_search_units(
+                event_id, analyzer_version, unit_kind, unit_key, unit_value,
+                normalized_value, confidence, metadata
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    event_id,
+                    version,
+                    unit_kind,
+                    unit_key or "",
+                    unit_value,
+                    normalized_value,
+                    confidence,
+                    metadata,
+                )
+                for event_id, version, unit_kind, unit_key, unit_value, normalized_value, confidence, metadata in rows
+            ],
+        )
+
+    def append_meaning_analysis_runs(
+        self,
+        tx: sqlite3.Connection,
+        runs: list[MeaningAnalysisRun],
+    ) -> None:
+        if not runs:
+            return
+        tx.executemany(
+            """
+            INSERT OR REPLACE INTO meaning_analysis_runs(
+                event_id, analyzer_version, processed_at, status, error, unit_count
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    run.event_id,
+                    run.analyzer_version,
+                    to_rfc3339(run.processed_at),
+                    run.status,
+                    run.error,
+                    run.unit_count,
+                )
+                for run in runs
+            ],
         )
 
     def candidate_event_ids_for_search_terms(self, terms: list[str]) -> list[str]:

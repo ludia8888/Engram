@@ -3,6 +3,7 @@ from __future__ import annotations
 import queue
 
 from .errors import QueueFullError
+from .meaning_index import MeaningIndexer
 from .projector import Projector
 from .semantic_index import SemanticIndexer
 from .storage.raw_log import SegmentedRawLog
@@ -17,6 +18,7 @@ class RecoveryService:
         store: EventStore,
         projector: Projector,
         semantic_indexer: SemanticIndexer,
+        meaning_indexer: MeaningIndexer,
         work_queue: queue.Queue[QueueItem],
         queue_put_timeout: float,
         extractor_version: str,
@@ -25,6 +27,7 @@ class RecoveryService:
         self.store = store
         self.projector = projector
         self.semantic_indexer = semantic_indexer
+        self.meaning_indexer = meaning_indexer
         self.work_queue = work_queue
         self.queue_put_timeout = queue_put_timeout
         self.extractor_version = extractor_version
@@ -44,6 +47,7 @@ class RecoveryService:
                     raise RuntimeError("startup projection recovery made no progress")
 
         self.semantic_indexer.index_missing()
+        self.meaning_indexer.index_missing()
 
         processed_turn_ids = self.store.successful_source_turn_ids(self.extractor_version)
         enqueued = 0
