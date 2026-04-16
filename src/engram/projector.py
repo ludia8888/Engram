@@ -16,6 +16,7 @@ class ProjectionState:
     entities: Mapping[str, Entity]
     relations: Mapping[str, tuple[RelationEdge, ...]]
     version: int
+    certified_seq: int = 0
 
 
 class Projector:
@@ -78,11 +79,13 @@ class Projector:
 
         with self.store.transaction() as tx:
             self.store.clear_dirty_range_ids(tx, captured_range_ids)
+            seq_at_clear = self.store.next_seq(tx) - 1
 
         self._state = ProjectionState(
             entities=MappingProxyType(new_snapshot),
             relations=MappingProxyType(new_relation_snapshot),
             version=state.version + 1,
+            certified_seq=seq_at_clear,
         )
         return len(owners)
 
@@ -113,11 +116,13 @@ class Projector:
 
         with self.store.transaction() as tx:
             self.store.clear_dirty_range_ids(tx, captured_range_ids)
+            seq_at_clear = self.store.next_seq(tx) - 1
 
         self._state = ProjectionState(
             entities=MappingProxyType(new_snapshot),
             relations=MappingProxyType(new_relation_snapshot),
             version=state.version + 1,
+            certified_seq=seq_at_clear,
         )
         return len(owners)
 
@@ -126,7 +131,7 @@ class Projector:
         if not state.entities and not state.relations:
             return None
 
-        last_seq = self.store.current_max_seq()
+        last_seq = state.certified_seq
         if last_seq == 0:
             return None
 
@@ -166,6 +171,7 @@ class Projector:
             entities=MappingProxyType(entities),
             relations=MappingProxyType(relations),
             version=row.projection_version,
+            certified_seq=row.last_seq,
         )
         self._snapshot_last_seq = row.last_seq
         return True
