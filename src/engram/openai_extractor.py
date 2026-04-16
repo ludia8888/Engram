@@ -401,6 +401,15 @@ def _merge_update_event(target: ExtractedEvent, incoming: ExtractedEvent) -> Non
         target.confidence = max(target.confidence, incoming.confidence)
     if incoming.reason:
         target.reason = incoming.reason
+    adopted_temporal = False
+    if target.effective_at_start is None and incoming.effective_at_start is not None:
+        target.effective_at_start = incoming.effective_at_start
+        adopted_temporal = True
+    if target.effective_at_end is None and incoming.effective_at_end is not None:
+        target.effective_at_end = incoming.effective_at_end
+        adopted_temporal = True
+    if adopted_temporal and target.time_confidence == "unknown" and incoming.time_confidence != "unknown":
+        target.time_confidence = incoming.time_confidence
 
 
 def _normalize_entity_id(

@@ -89,9 +89,6 @@ def fold_entity_events_valid_at(
     for event in events:
         if not event.type.startswith("entity.") or event.data["id"] != entity_id:
             continue
-        if event.type == "entity.create":
-            entity_type = event.data["type"]
-
         if not covers_valid_time(event, at):
             if _has_unknown_effective_time(event):
                 unknown_attrs = _merge_unknown_attrs(unknown_attrs, event.data.get("attrs", {}).keys())
@@ -99,6 +96,7 @@ def fold_entity_events_valid_at(
 
         supporting_event_ids.append(event.id)
         if event.type == "entity.create":
+            entity_type = event.data["type"]
             attrs = dict(event.data["attrs"])
             active = True
         elif event.type == "entity.update":

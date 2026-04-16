@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 import queue
 import re
 from pathlib import Path
@@ -83,6 +84,7 @@ class Engram:
                 raw_log=self.raw_log,
                 store=self.store,
                 projector=self.projector,
+                semantic_indexer=self.semantic_indexer,
                 work_queue=self.queue,
                 queue_put_timeout=self.queue_put_timeout,
                 extractor_version=self.extractor.version,
@@ -122,6 +124,25 @@ class Engram:
                 self.conn = None
         finally:
             self._writer_lock.release()
+
+    @contextmanager
+    def _paused_background_worker(self):
+        worker = self._background_worker
+        if worker is None:
+            yield
+            return
+        worker.stop()
+        try:
+            yield
+        finally:
+            worker.start()
+
+    def _request_background_maintenance(self) -> None:
+        if self._background_worker is not None:
+            self._background_worker.request_maintenance()
+
+    def _rebuild_projection_dirty(self) -> int:
+        return self.projector.rebuild_dirty_until_stable()
 
     def turn(
         self,
@@ -205,6 +226,7 @@ class Engram:
             self.store.append_event_entities(tx, event.id, event_entities)
             self.store.append_event_search_terms(tx, event.id, event_search_terms(event))
             self.store.mark_dirty(tx, dirty_rows)
+        self._request_background_maintenance()
         return event.id
 
     def get(self, entity_id: str) -> Entity | None:
@@ -352,10 +374,14 @@ class Engram:
                 raise ValidationError(f"from_turn_id {from_turn_id} is after to_turn_id {to_turn_id}") from exc
             raise
 
-        count = 0
-        for turn in turns:
-            self.canonical_worker.process(QueueItem.from_turn(turn), force=True)
-            count += 1
+        background_was_running = self._background_worker is not None
+        with self._paused_background_worker():
+            count = 0
+            for turn in turns:
+                self.canonical_worker.process(QueueItem.from_turn(turn), force=True)
+                count += 1
+        if background_was_running and count > 0:
+            self._request_background_maintenance()
         return count
 
     def rebuild_projection(
@@ -364,44 +390,45 @@ class Engram:
         owner_id: str | None = None,
         mode: Literal["dirty", "full"] = "dirty",
     ) -> ProjectionRebuildResult:
-        dirty_owner_count_before = len(self.store.dirty_owner_ids())
+        with self._paused_background_worker():
+            dirty_owner_count_before = len(self.store.dirty_owner_ids())
 
-        if mode == "dirty":
-            if owner_id is None:
-                rebuilt_owner_count = self.projector.rebuild_dirty_until_stable()
-                scope: Literal["dirty", "owner", "full"] = "dirty"
+            if mode == "dirty":
+                if owner_id is None:
+                    rebuilt_owner_count = self._rebuild_projection_dirty()
+                    scope: Literal["dirty", "owner", "full"] = "dirty"
+                    target_owner_id = None
+                else:
+                    current_relation_neighbors = [
+                        edge.other_entity_id
+                        for edge in self.projector.current_relation_snapshot().get(owner_id, ())
+                    ]
+                    canonical_relation_neighbors = [
+                        edge.other_entity_id for edge in self.store.materialize_current_relations(owner_id)
+                    ]
+                    rebuilt_owner_count = self.projector.rebuild_owner(
+                        owner_id,
+                        related_owner_ids=current_relation_neighbors + canonical_relation_neighbors,
+                    )
+                    scope = "owner"
+                    target_owner_id = owner_id
+            elif mode == "full":
+                if owner_id is not None:
+                    raise ValidationError("owner_id is not supported when mode='full'")
+                rebuilt_owner_count = self.projector.rebuild_all()
+                scope = "full"
                 target_owner_id = None
             else:
-                current_relation_neighbors = [
-                    edge.other_entity_id
-                    for edge in self.projector.current_relation_snapshot().get(owner_id, ())
-                ]
-                canonical_relation_neighbors = [
-                    edge.other_entity_id for edge in self.store.materialize_current_relations(owner_id)
-                ]
-                rebuilt_owner_count = self.projector.rebuild_owner(
-                    owner_id,
-                    related_owner_ids=current_relation_neighbors + canonical_relation_neighbors,
-                )
-                scope = "owner"
-                target_owner_id = owner_id
-        elif mode == "full":
-            if owner_id is not None:
-                raise ValidationError("owner_id is not supported when mode='full'")
-            rebuilt_owner_count = self.projector.rebuild_all()
-            scope = "full"
-            target_owner_id = None
-        else:
-            raise ValidationError(f"unsupported rebuild mode: {mode}")
+                raise ValidationError(f"unsupported rebuild mode: {mode}")
 
-        dirty_owner_count_after = len(self.store.dirty_owner_ids())
-        return ProjectionRebuildResult(
-            scope=scope,
-            target_owner_id=target_owner_id,
-            rebuilt_owner_count=rebuilt_owner_count,
-            dirty_owner_count_before=dirty_owner_count_before,
-            dirty_owner_count_after=dirty_owner_count_after,
-        )
+            dirty_owner_count_after = len(self.store.dirty_owner_ids())
+            return ProjectionRebuildResult(
+                scope=scope,
+                target_owner_id=target_owner_id,
+                rebuilt_owner_count=rebuilt_owner_count,
+                dirty_owner_count_before=dirty_owner_count_before,
+                dirty_owner_count_after=dirty_owner_count_after,
+            )
 
     def _build_history(
         self,
@@ -605,29 +632,47 @@ class Engram:
     ) -> None:
         if level == "raw":
             return
-        elif level == "canonical":
+        background_was_running = self._background_worker is not None
+        with self._paused_background_worker():
+            processed_canonical = self._flush_internal(level)
+        if background_was_running and processed_canonical:
+            self._request_background_maintenance()
+
+    def _flush_internal(
+        self,
+        level: Literal["raw", "canonical", "projection", "snapshot", "index", "all"],
+    ) -> bool:
+        if level == "raw":
+            return False
+        if level == "canonical":
+            processed = 0
             while True:
                 try:
                     item = self.queue.get_nowait()
                 except queue.Empty:
-                    return
+                    break
                 try:
                     self.canonical_worker.process(item)
                 finally:
                     self.queue.task_done()
-        elif level == "projection":
-            self.rebuild_projection(mode="dirty")
-        elif level == "snapshot":
+                processed += 1
+            return processed > 0
+        if level == "projection":
+            self._rebuild_projection_dirty()
+            return False
+        if level == "snapshot":
             self.projector.save_snapshot()
-        elif level == "index":
+            return False
+        if level == "index":
             self.semantic_indexer.index_missing()
-        elif level == "all":
-            self.flush("canonical")
-            self.flush("projection")
-            self.flush("snapshot")
-            self.flush("index")
-        else:
-            raise ValidationError(f"unsupported flush level: {level}")
+            return False
+        if level == "all":
+            processed_canonical = self._flush_internal("canonical")
+            self._flush_internal("projection")
+            self._flush_internal("snapshot")
+            self._flush_internal("index")
+            return processed_canonical
+        raise ValidationError(f"unsupported flush level: {level}")
 
     def _get_known_relations_at(self, entity_id: str, at) -> list[RelationEdge]:
         target = ensure_utc(at, "at")

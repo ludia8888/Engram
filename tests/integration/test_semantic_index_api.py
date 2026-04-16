@@ -110,7 +110,7 @@ def test_flush_index_backfills_vec_events_for_current_embedder_version(tmp_path)
     mem.close()
 
 
-def test_flush_index_keeps_old_versions_and_backfills_new_one(tmp_path):
+def test_startup_recovery_backfills_new_static_embedder_version_rows(tmp_path):
     first = Engram(
         user_id="alice",
         path=str(tmp_path),
@@ -131,7 +131,7 @@ def test_flush_index_keeps_old_versions_and_backfills_new_one(tmp_path):
     )
 
     assert second.store.count_vec_events("embed-v1") == 1
-    assert second.store.count_vec_events("embed-v2") == 0
+    assert second.store.count_vec_events("embed-v2") == 1
 
     second.flush("index")
 
@@ -654,7 +654,7 @@ def test_flush_index_backfills_vec_events_for_openai_embedder_version(tmp_path, 
     mem.close()
 
 
-def test_flush_index_keeps_hash_rows_and_adds_openai_version_rows(tmp_path, monkeypatch):
+def test_startup_recovery_backfills_openai_version_rows_alongside_hash_rows(tmp_path, monkeypatch):
     first = Engram(
         user_id="alice",
         path=str(tmp_path),
@@ -683,7 +683,7 @@ def test_flush_index_keeps_hash_rows_and_adds_openai_version_rows(tmp_path, monk
     second = Engram(user_id="alice", path=str(tmp_path), embedder=openai_embedder)
 
     assert second.store.count_vec_events("hash-test-v1") == 1
-    assert second.store.count_vec_events(openai_embedder.version) == 0
+    assert second.store.count_vec_events(openai_embedder.version) == 1
 
     second.flush("index")
 
@@ -734,7 +734,7 @@ def test_search_can_match_semantic_only_with_openai_embedder(tmp_path, monkeypat
     mem.close()
 
 
-def test_openai_embedder_backend_change_creates_new_version_rows(tmp_path, monkeypatch):
+def test_startup_recovery_backfills_rows_for_changed_openai_backend_version(tmp_path, monkeypatch):
     install_fake_openai(
         monkeypatch,
         {
@@ -762,7 +762,7 @@ def test_openai_embedder_backend_change_creates_new_version_rows(tmp_path, monke
 
     assert first_embedder.version != second_embedder.version
     assert second.store.count_vec_events(first_embedder.version) == 1
-    assert second.store.count_vec_events(second_embedder.version) == 0
+    assert second.store.count_vec_events(second_embedder.version) == 1
 
     second.flush("index")
 

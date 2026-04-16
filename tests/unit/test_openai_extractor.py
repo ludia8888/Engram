@@ -458,3 +458,44 @@ def test_exact_time_confidence_is_preserved(monkeypatch):
     events = extractor.extract(_queue_item())
 
     assert events[0].time_confidence == "exact"
+
+
+def test_create_update_merge_preserves_temporal_fields(monkeypatch):
+    _install_fake_openai(
+        monkeypatch,
+        [
+            {
+                "events": [
+                    {
+                        "type": "entity.create",
+                        "data": {"id": "self", "type": "user", "attrs": {"name": "Alice"}},
+                        "confidence": 0.8,
+                        "reason": "user identity stated",
+                    },
+                    {
+                        "type": "entity.update",
+                        "data": {"id": "self", "attrs": {"location": "Busan"}},
+                        "confidence": 0.95,
+                        "reason": "moved last week",
+                        "effective_at_start": "2026-04-24T00:00:00Z",
+                        "effective_at_end": "2026-05-01T00:00:00Z",
+                        "time_confidence": "inferred",
+                    },
+                ]
+            }
+        ],
+    )
+    extractor = OpenAIExtractor()
+    extractor.bind_runtime_context(
+        safe_user_id="alice",
+        recent_turns_provider=lambda item, limit: [],
+    )
+
+    events = extractor.extract(_queue_item())
+
+    assert len(events) == 1
+    assert events[0].type == "entity.create"
+    assert events[0].data["attrs"] == {"name": "Alice", "location": "Busan"}
+    assert events[0].effective_at_start == dt("2026-04-24T00:00:00Z")
+    assert events[0].effective_at_end == dt("2026-05-01T00:00:00Z")
+    assert events[0].time_confidence == "inferred"

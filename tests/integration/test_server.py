@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+
 import pytest
 from starlette.testclient import TestClient
 
@@ -18,6 +20,15 @@ def _client(tmp_path, **kwargs) -> TestClient:
     return TestClient(app)
 
 
+def _wait_for(pred, timeout=5.0, interval=0.05):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if pred():
+            return True
+        time.sleep(interval)
+    return False
+
+
 def test_health(tmp_path):
     with _client(tmp_path) as client:
         resp = client.get("/health")
@@ -29,6 +40,20 @@ def test_health(tmp_path):
         assert body["worker_alive"] is None
 
 
+def test_health_reports_live_worker_when_auto_flush_enabled(tmp_path):
+    app = create_app(
+        user_id="alice",
+        path=str(tmp_path),
+        auto_flush=True,
+    )
+    with TestClient(app) as client:
+        resp = client.get("/health")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["auto_flush"] is True
+        assert body["worker_alive"] is True
+
+
 def test_turn_round_trip(tmp_path):
     with _client(tmp_path) as client:
         resp = client.post("/turn", json={
@@ -36,7 +61,7 @@ def test_turn_round_trip(tmp_path):
             "assistant": "hi",
             "observed_at": "2026-05-01T10:00:00Z",
         })
-        assert resp.status_code == 200
+        assert resp.status_code == 201
         ack = resp.json()
         assert "turn_id" in ack
         assert ack["queued"] is True
@@ -54,7 +79,7 @@ def test_append_and_get_entity(tmp_path):
             "data": {"id": "user:alice", "type": "user", "attrs": {"diet": "vegetarian"}},
             "observed_at": "2026-05-01T10:00:00Z",
         })
-        assert resp.status_code == 200
+        assert resp.status_code == 201
         assert "event_id" in resp.json()
 
         resp2 = client.get("/entity/user:alice")
@@ -187,6 +212,15 @@ def test_validation_error_returns_400(tmp_path):
         assert "detail" in resp.json()
 
 
+def test_missing_required_field_returns_422(tmp_path):
+    with _client(tmp_path) as client:
+        resp = client.post("/turn", json={
+            "user": "hello",
+            "observed_at": "2026-05-01T10:00:00Z",
+        })
+        assert resp.status_code == 422
+
+
 def test_raw_get_404(tmp_path):
     with _client(tmp_path) as client:
         resp = client.get("/raw/nonexistent-id")
@@ -200,6 +234,17 @@ def test_search_rejects_non_positive_k(tmp_path):
 
         resp2 = client.get("/search?query=test&k=-1")
         assert resp2.status_code == 422
+
+
+def test_append_rejects_out_of_range_confidence(tmp_path):
+    with _client(tmp_path) as client:
+        resp = client.post("/append", json={
+            "event_type": "entity.create",
+            "data": {"id": "user:alice", "type": "user", "attrs": {"diet": "vegetarian"}},
+            "observed_at": "2026-05-01T10:00:00Z",
+            "confidence": 999.0,
+        })
+        assert resp.status_code == 422
 
 
 def test_relation_history_endpoint(tmp_path):
@@ -250,8 +295,48 @@ def test_search_rejects_reversed_time_window(tmp_path):
         assert "before" in resp.json()["detail"]
 
 
+def test_search_rejects_partial_time_window(tmp_path):
+    with _client(tmp_path) as client:
+        resp = client.get("/search?query=test&time_window_start=2026-05-01T00:00:00Z")
+        assert resp.status_code == 400
+        assert "both be provided" in resp.json()["detail"]
+
+
 def test_context_rejects_reversed_time_window(tmp_path):
     with _client(tmp_path) as client:
         resp = client.get("/context?query=test&time_window_start=2026-05-02T00:00:00Z&time_window_end=2026-05-01T00:00:00Z")
         assert resp.status_code == 400
         assert "before" in resp.json()["detail"]
+
+
+def test_relations_reject_partial_time_window(tmp_path):
+    with _client(tmp_path) as client:
+        resp = client.get("/entity/user:alice/relations?time_mode=valid&time_window_end=2026-05-01T00:00:00Z")
+        assert resp.status_code == 400
+        assert "both be provided" in resp.json()["detail"]
+
+
+def test_reprocess_endpoint_propagates_validation_error(tmp_path):
+    with _client(tmp_path) as client:
+        resp = client.post("/reprocess", json={"from_turn_id": "missing-turn"})
+        assert resp.status_code == 400
+        assert "turn_id not found" in resp.json()["detail"]
+
+
+def test_append_auto_flush_eventually_updates_derived_state(tmp_path):
+    app = create_app(
+        user_id="alice",
+        path=str(tmp_path),
+        auto_flush=True,
+    )
+    with TestClient(app) as client:
+        resp = client.post("/append", json={
+            "event_type": "entity.create",
+            "data": {"id": "user:alice", "type": "user", "attrs": {"location": "Busan"}},
+            "observed_at": "2026-05-01T10:00:00Z",
+        })
+        assert resp.status_code == 201
+
+        mem = client.app.state.engram
+        assert _wait_for(lambda: mem.store.count_dirty_ranges() == 0, timeout=5.0)
+        assert _wait_for(lambda: mem.store.count_vec_events(mem.embedder.version) >= 1, timeout=5.0)

@@ -38,6 +38,8 @@ class BackgroundWorker:
         self._thread: threading.Thread | None = None
         self._retry_heap: list[tuple[float, int, QueueItem]] = []
         self._retry_counter = 0
+        self._maintenance_requested = 0
+        self._maintenance_completed = 0
 
     def start(self) -> None:
         if self._thread is not None:
@@ -62,6 +64,11 @@ class BackgroundWorker:
         with self._cond:
             self._cond.notify()
 
+    def request_maintenance(self) -> None:
+        with self._cond:
+            self._maintenance_requested += 1
+            self._cond.notify()
+
     @property
     def is_alive(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
@@ -69,8 +76,11 @@ class BackgroundWorker:
     def _run_loop(self) -> None:
         while not self._stop_event.is_set():
             processed_any = self._drain_and_process()
-            if processed_any:
+            maintenance_target = self._maintenance_target()
+            if processed_any or maintenance_target > self._maintenance_completed:
                 self._rebuild_and_index()
+                self._mark_maintenance_completed(maintenance_target)
+                continue
             with self._cond:
                 self._cond.wait(timeout=self._drain_timeout)
 
@@ -142,3 +152,12 @@ class BackgroundWorker:
                 logger.info("semantic index: indexed=%d in %.3fs", indexed, elapsed)
         except Exception:
             logger.exception("semantic indexing failed")
+
+    def _maintenance_target(self) -> int:
+        with self._cond:
+            return self._maintenance_requested
+
+    def _mark_maintenance_completed(self, target: int) -> None:
+        with self._cond:
+            if self._maintenance_completed < target:
+                self._maintenance_completed = target
