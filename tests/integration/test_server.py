@@ -241,3 +241,17 @@ def test_rebuild_projection_endpoint(tmp_path):
         body = resp.json()
         assert body["rebuilt_owner_count"] >= 1
         assert body["dirty_owner_count_after"] == 0
+
+
+def test_search_rejects_reversed_time_window(tmp_path):
+    with _client(tmp_path) as client:
+        resp = client.get("/search?query=test&time_window_start=2026-05-02T00:00:00Z&time_window_end=2026-05-01T00:00:00Z")
+        assert resp.status_code == 400
+        assert "before" in resp.json()["detail"]
+
+
+def test_context_rejects_reversed_time_window(tmp_path):
+    with _client(tmp_path) as client:
+        resp = client.get("/context?query=test&time_window_start=2026-05-02T00:00:00Z&time_window_end=2026-05-01T00:00:00Z")
+        assert resp.status_code == 400
+        assert "before" in resp.json()["detail"]

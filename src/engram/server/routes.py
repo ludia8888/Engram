@@ -42,6 +42,16 @@ def _parse_dt(value: str | None, name: str):
         raise HTTPException(400, detail=f"Invalid datetime for {name}: {value}")
 
 
+def _parse_time_window(start: str | None, end: str | None):
+    tw_start = _parse_dt(start, "time_window_start")
+    tw_end = _parse_dt(end, "time_window_end")
+    if (tw_start is None) != (tw_end is None):
+        raise HTTPException(400, detail="time_window_start and time_window_end must both be provided or both omitted")
+    if tw_start is not None and tw_end is not None and tw_start >= tw_end:
+        raise HTTPException(400, detail="time_window_start must be before time_window_end")
+    return (tw_start, tw_end) if tw_start and tw_end else None
+
+
 @router.get("/health")
 def health(request: Request) -> HealthResponse:
     mem = _engram(request)
@@ -140,11 +150,7 @@ def get_relations(
 ) -> list[RelationEdgeResponse]:
     mem = _engram(request)
     at_dt = _parse_dt(at, "at")
-    tw_start = _parse_dt(time_window_start, "time_window_start")
-    tw_end = _parse_dt(time_window_end, "time_window_end")
-    time_window = (tw_start, tw_end) if tw_start and tw_end else None
-    if (tw_start is None) != (tw_end is None):
-        raise HTTPException(400, detail="time_window_start and time_window_end must both be provided or both omitted")
+    time_window = _parse_time_window(time_window_start, time_window_end)
     edges = mem.get_relations(entity_id, time_mode=time_mode, at=at_dt, time_window=time_window)
     return [RelationEdgeResponse.model_validate(e) for e in edges]
 
@@ -159,11 +165,7 @@ def search(
     k: int = Query(default=20, ge=1),
 ) -> list[SearchResultResponse]:
     mem = _engram(request)
-    tw_start = _parse_dt(time_window_start, "time_window_start")
-    tw_end = _parse_dt(time_window_end, "time_window_end")
-    time_window = (tw_start, tw_end) if tw_start and tw_end else None
-    if (tw_start is None) != (tw_end is None):
-        raise HTTPException(400, detail="time_window_start and time_window_end must both be provided or both omitted")
+    time_window = _parse_time_window(time_window_start, time_window_end)
     results = mem.search(query, time_mode=time_mode, time_window=time_window, k=k)
     return [SearchResultResponse.model_validate(r) for r in results]
 
@@ -180,11 +182,7 @@ def context(
     include_raw: bool = False,
 ):
     mem = _engram(request)
-    tw_start = _parse_dt(time_window_start, "time_window_start")
-    tw_end = _parse_dt(time_window_end, "time_window_end")
-    time_window = (tw_start, tw_end) if tw_start and tw_end else None
-    if (tw_start is None) != (tw_end is None):
-        raise HTTPException(400, detail="time_window_start and time_window_end must both be provided or both omitted")
+    time_window = _parse_time_window(time_window_start, time_window_end)
     text = mem.context(
         query,
         time_mode=time_mode,
