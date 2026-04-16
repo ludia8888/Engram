@@ -24,9 +24,14 @@ server = [
   "uvicorn[standard]>=0.30.0",
   "pydantic>=2.0",
 ]
+mcp = [
+  "mcp[cli]>=1.0.0",
+]
 
 [project.scripts]
+engram = "engram.cli:main"
 engram-server = "engram.server.__main__:main"
+engram-mcp = "engram.mcp_server:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/engram"]
