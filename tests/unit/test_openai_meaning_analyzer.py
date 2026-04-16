@@ -94,7 +94,7 @@ def test_openai_meaning_analyzer_parses_event_units_and_query_plan(monkeypatch):
     event_analysis = analyzer.analyze_event(_event())
     query_plan = analyzer.plan_query("Busan-1499 traveler")
 
-    assert analyzer.version == "openai-meaning-analyzer:example.test/v1:gpt-5.4-mini:v1"
+    assert analyzer.version == "openai-meaning-analyzer:example.test/v1:gpt-4o-mini:v1"
     assert event_analysis.units[0].kind == "protected_phrase"
     assert event_analysis.units[0].normalized_value == "busan-1499"
     assert event_analysis.units[1].kind == "facet"

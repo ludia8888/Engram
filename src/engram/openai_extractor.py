@@ -13,7 +13,7 @@ from .semantic import _default_openai_space_id, _load_openai_client_class
 from .time_utils import from_rfc3339
 from .types import ExtractedEvent, QueueItem, RawTurn
 
-_OPENAI_DEFAULT_MODEL = "gpt-5.4-mini"
+_OPENAI_DEFAULT_MODEL = "gpt-4o-mini"
 _SELF_MARKERS = {
     "self",
     "me",
