@@ -379,7 +379,66 @@ flowchart TB
 
 ---
 
-## Pluggable Components
+## Model Configuration
+
+Engram works with **any LLM** via environment variables. All components default to local zero-cost implementations and can be swapped to any OpenAI-compatible provider.
+
+### Quick Setup Examples
+
+```bash
+# OpenAI (default)
+export ENGRAM_EXTRACTOR=openai
+export OPENAI_API_KEY=sk-...
+engram-server
+
+# Claude via OpenRouter
+export ENGRAM_EXTRACTOR=openai
+export ENGRAM_OPENAI_BASE_URL=https://openrouter.ai/api/v1
+export ENGRAM_OPENAI_MODEL=anthropic/claude-sonnet-4.6
+export OPENAI_API_KEY=sk-or-...
+engram-server
+
+# Gemini via Google AI
+export ENGRAM_EXTRACTOR=openai
+export ENGRAM_OPENAI_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai
+export ENGRAM_OPENAI_MODEL=gemini-2.5-flash
+export OPENAI_API_KEY=AIza...
+engram-server
+
+# Local model (Ollama)
+export ENGRAM_EXTRACTOR=openai
+export ENGRAM_OPENAI_BASE_URL=http://localhost:11434/v1
+export ENGRAM_OPENAI_MODEL=llama3
+export OPENAI_API_KEY=unused
+engram-server
+```
+
+### All Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ENGRAM_EXTRACTOR` | `null` | `null` (no extraction) or `openai` |
+| `ENGRAM_EMBEDDER` | `hash` | `hash` (local, $0) or `openai` |
+| `ENGRAM_MEANING_ANALYZER` | `null` | `null` (no meaning analysis) or `openai` |
+| `OPENAI_API_KEY` | — | API key for the provider |
+| `ENGRAM_OPENAI_BASE_URL` | — | Custom endpoint (proxy, Azure, local) |
+| `ENGRAM_OPENAI_MODEL` | `gpt-5.4-mini` | Chat model for extractor |
+| `ENGRAM_OPENAI_EMBED_MODEL` | `text-embedding-3-small` | Embedding model |
+| `ENGRAM_OPENAI_EMBED_DIMS` | — | Embedding dimensions override |
+| `ENGRAM_OPENAI_MEANING_MODEL` | `gpt-5.4-mini` | Chat model for meaning analyzer |
+
+### Compatible Models
+
+Any model accessible via an OpenAI-compatible API works. Tested providers:
+
+| Provider | Models | Base URL |
+|----------|--------|----------|
+| **OpenAI** | gpt-5.4-mini, gpt-5.4, gpt-4o-mini | *(default)* |
+| **Anthropic** (via proxy) | claude-sonnet-4.6, claude-haiku-4.5 | OpenRouter / LiteLLM |
+| **Google** (via proxy) | gemini-2.5-flash, gemini-2.5-pro | Google AI / OpenRouter |
+| **Local** | llama3, mistral, phi-3 | Ollama / vLLM |
+
+### Pluggable Components
 
 | Component | Default ($0) | OpenAI Option |
 |-----------|-------------|---------------|
@@ -387,7 +446,7 @@ flowchart TB
 | **Embedder** | `HashEmbedder` | `OpenAIEmbedder` — semantic vector search |
 | **MeaningAnalyzer** | `NullMeaningAnalyzer` | `OpenAIMeaningAnalyzer` — IDF-weighted meaning search |
 
-All components implement Protocols — swap in any LLM provider (Claude, Gemini, local models).
+All components implement Protocols — swap in any LLM provider by implementing the interface.
 
 ---
 
