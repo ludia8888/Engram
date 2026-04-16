@@ -129,13 +129,20 @@ class Engram:
     def _paused_background_worker(self):
         worker = self._background_worker
         if worker is None:
-            yield None
+            yield
             return
         worker.stop()
         try:
-            yield worker
+            yield
         finally:
             worker.start()
+
+    def _request_background_maintenance(self) -> None:
+        if self._background_worker is not None:
+            self._background_worker.request_maintenance()
+
+    def _rebuild_projection_dirty(self) -> int:
+        return self.projector.rebuild_dirty_until_stable()
 
     def turn(
         self,
@@ -219,8 +226,7 @@ class Engram:
             self.store.append_event_entities(tx, event.id, event_entities)
             self.store.append_event_search_terms(tx, event.id, event_search_terms(event))
             self.store.mark_dirty(tx, dirty_rows)
-        if self._background_worker is not None:
-            self._background_worker.request_maintenance()
+        self._request_background_maintenance()
         return event.id
 
     def get(self, entity_id: str) -> Entity | None:
@@ -368,13 +374,14 @@ class Engram:
                 raise ValidationError(f"from_turn_id {from_turn_id} is after to_turn_id {to_turn_id}") from exc
             raise
 
-        with self._paused_background_worker() as worker:
+        background_was_running = self._background_worker is not None
+        with self._paused_background_worker():
             count = 0
             for turn in turns:
                 self.canonical_worker.process(QueueItem.from_turn(turn), force=True)
                 count += 1
-        if worker is not None and count > 0:
-            worker.request_maintenance()
+        if background_was_running and count > 0:
+            self._request_background_maintenance()
         return count
 
     def rebuild_projection(
@@ -388,7 +395,7 @@ class Engram:
 
             if mode == "dirty":
                 if owner_id is None:
-                    rebuilt_owner_count = self.projector.rebuild_dirty_until_stable()
+                    rebuilt_owner_count = self._rebuild_projection_dirty()
                     scope: Literal["dirty", "owner", "full"] = "dirty"
                     target_owner_id = None
                 else:
@@ -625,10 +632,11 @@ class Engram:
     ) -> None:
         if level == "raw":
             return
-        with self._paused_background_worker() as worker:
+        background_was_running = self._background_worker is not None
+        with self._paused_background_worker():
             processed_canonical = self._flush_internal(level)
-        if worker is not None and processed_canonical:
-            worker.request_maintenance()
+        if background_was_running and processed_canonical:
+            self._request_background_maintenance()
 
     def _flush_internal(
         self,
@@ -650,7 +658,7 @@ class Engram:
                 processed += 1
             return processed > 0
         if level == "projection":
-            self.projector.rebuild_dirty_until_stable()
+            self._rebuild_projection_dirty()
             return False
         if level == "snapshot":
             self.projector.save_snapshot()

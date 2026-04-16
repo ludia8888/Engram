@@ -110,7 +110,7 @@ def test_flush_index_backfills_vec_events_for_current_embedder_version(tmp_path)
     mem.close()
 
 
-def test_flush_index_keeps_old_versions_and_backfills_new_one(tmp_path):
+def test_startup_recovery_backfills_new_static_embedder_version_rows(tmp_path):
     first = Engram(
         user_id="alice",
         path=str(tmp_path),
@@ -654,7 +654,7 @@ def test_flush_index_backfills_vec_events_for_openai_embedder_version(tmp_path, 
     mem.close()
 
 
-def test_flush_index_keeps_hash_rows_and_adds_openai_version_rows(tmp_path, monkeypatch):
+def test_startup_recovery_backfills_openai_version_rows_alongside_hash_rows(tmp_path, monkeypatch):
     first = Engram(
         user_id="alice",
         path=str(tmp_path),
@@ -734,7 +734,7 @@ def test_search_can_match_semantic_only_with_openai_embedder(tmp_path, monkeypat
     mem.close()
 
 
-def test_openai_embedder_backend_change_creates_new_version_rows(tmp_path, monkeypatch):
+def test_startup_recovery_backfills_rows_for_changed_openai_backend_version(tmp_path, monkeypatch):
     install_fake_openai(
         monkeypatch,
         {
