@@ -33,6 +33,7 @@ mcp = [
 engram = "engram.cli:main"
 engram-server = "engram.server.__main__:main"
 engram-mcp = "engram.mcp_server:main"
+engram-mcp-remote = "engram.mcp_server:main_remote"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/engram"]

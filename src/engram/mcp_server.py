@@ -10,14 +10,16 @@ from .config import build_embedder, build_extractor, build_meaning_analyzer
 from .engram import Engram
 from .time_utils import from_rfc3339, to_rfc3339
 
-mcp = FastMCP(
-    "engram",
-    instructions=(
-        "Engram is a structured long-term memory engine for LLM agents. "
-        "Use engram_turn to store conversations, engram_append to record structured observations, "
-        "engram_recall to get relevant memory context for a query, "
-        "engram_get to look up a specific entity, and engram_search for retrieval."
-    ),
+_VALID_TRANSPORTS = ("stdio", "sse", "streamable-http")
+
+_DEFAULT_REMOTE_HOST = "0.0.0.0"
+_DEFAULT_REMOTE_PORT = 8080
+
+_INSTRUCTIONS = (
+    "Engram is a structured long-term memory engine for LLM agents. "
+    "Use engram_turn to store conversations, engram_append to record structured observations, "
+    "engram_recall to get relevant memory context for a query, "
+    "engram_get to look up a specific entity, and engram_search for retrieval."
 )
 
 _engram: Engram | None = None
@@ -65,8 +67,11 @@ def _view_to_dict(view) -> dict:
     }
 
 
-@mcp.tool()
-def engram_turn(
+# ---------------------------------------------------------------------------
+# Tool implementations (plain functions, registered via _register_tools)
+# ---------------------------------------------------------------------------
+
+def _tool_turn(
     user: str,
     assistant: str,
     observed_at: str | None = None,
@@ -96,8 +101,7 @@ def engram_turn(
     })
 
 
-@mcp.tool()
-def engram_append(
+def _tool_append(
     event_type: str,
     data: str,
     observed_at: str | None = None,
@@ -135,8 +139,7 @@ def engram_append(
     return json.dumps({"event_id": event_id})
 
 
-@mcp.tool()
-def engram_recall(
+def _tool_recall(
     query: str,
     time_mode: str = "known",
     max_tokens: int = 2000,
@@ -165,8 +168,7 @@ def engram_recall(
     )
 
 
-@mcp.tool()
-def engram_get(entity_id: str) -> str:
+def _tool_get(entity_id: str) -> str:
     """Look up the current state of a specific entity by ID.
 
     Args:
@@ -179,8 +181,7 @@ def engram_get(entity_id: str) -> str:
     return json.dumps(_entity_to_dict(entity))
 
 
-@mcp.tool()
-def engram_search(
+def _tool_search(
     query: str,
     k: int = 10,
     time_mode: str = "known",
@@ -206,8 +207,7 @@ def engram_search(
     ])
 
 
-@mcp.tool()
-def engram_get_relations(entity_id: str, time_mode: str = "known") -> str:
+def _tool_get_relations(entity_id: str, time_mode: str = "known") -> str:
     """Get all relations for an entity (e.g. who is their manager, what project are they on).
 
     Args:
@@ -227,8 +227,7 @@ def engram_get_relations(entity_id: str, time_mode: str = "known") -> str:
     ])
 
 
-@mcp.tool()
-def engram_history(
+def _tool_history(
     entity_id: str,
     attr: str | None = None,
     time_mode: str = "known",
@@ -261,8 +260,7 @@ def engram_history(
     ])
 
 
-@mcp.tool()
-def engram_flush(level: str = "all") -> str:
+def _tool_flush(level: str = "all") -> str:
     """Flush the memory pipeline. Use after batch operations or when you need
     immediate consistency.
 
@@ -275,8 +273,80 @@ def engram_flush(level: str = "all") -> str:
     return json.dumps({"status": "ok", "level": level})
 
 
+# ---------------------------------------------------------------------------
+# Tool registration
+# ---------------------------------------------------------------------------
+
+_TOOLS = [
+    ("engram_turn", _tool_turn),
+    ("engram_append", _tool_append),
+    ("engram_recall", _tool_recall),
+    ("engram_get", _tool_get),
+    ("engram_search", _tool_search),
+    ("engram_get_relations", _tool_get_relations),
+    ("engram_history", _tool_history),
+    ("engram_flush", _tool_flush),
+]
+
+
+def _register_tools(server: FastMCP) -> None:
+    for name, fn in _TOOLS:
+        server.tool(name=name)(fn)
+
+
+def build_mcp_server(
+    *,
+    host: str | None = None,
+    port: int | None = None,
+) -> FastMCP:
+    """Build a fully configured FastMCP server with all engram tools registered."""
+    kwargs: dict = {"name": "engram", "instructions": _INSTRUCTIONS}
+    if host is not None:
+        kwargs["host"] = host
+    if port is not None:
+        kwargs["port"] = port
+    server = FastMCP(**kwargs)
+    _register_tools(server)
+    return server
+
+
+# Module-level instance for stdio (backward compatible import)
+mcp = build_mcp_server()
+
+
+# ---------------------------------------------------------------------------
+# Entrypoints
+# ---------------------------------------------------------------------------
+
+def _resolve_transport(default: str = "stdio") -> str:
+    transport = os.environ.get("ENGRAM_MCP_TRANSPORT", default)
+    if transport not in _VALID_TRANSPORTS:
+        raise ValueError(
+            f"ENGRAM_MCP_TRANSPORT={transport!r} is not supported. "
+            f"Choose one of: {', '.join(_VALID_TRANSPORTS)}"
+        )
+    return transport
+
+
 def main() -> None:
-    mcp.run()
+    """Run with stdio (default) or remote transport via ENGRAM_MCP_TRANSPORT."""
+    transport = _resolve_transport(default="stdio")
+    if transport == "stdio":
+        mcp.run(transport="stdio")
+    else:
+        host = os.environ.get("ENGRAM_MCP_HOST", _DEFAULT_REMOTE_HOST)
+        port = int(os.environ.get("ENGRAM_MCP_PORT", str(_DEFAULT_REMOTE_PORT)))
+        server = build_mcp_server(host=host, port=port)
+        server.run(transport=transport)
+
+
+def main_remote() -> None:
+    """Convenience entrypoint: SSE transport on 0.0.0.0:8080 by default."""
+    transport = _resolve_transport(default="sse")
+    host = os.environ.get("ENGRAM_MCP_HOST", _DEFAULT_REMOTE_HOST)
+    port = int(os.environ.get("ENGRAM_MCP_PORT", str(_DEFAULT_REMOTE_PORT)))
+    server = build_mcp_server(host=host, port=port)
+    server.run(transport=transport)
 
 
 if __name__ == "__main__":
