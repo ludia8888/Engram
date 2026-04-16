@@ -218,6 +218,9 @@ class EventStore:
             relation_blob=row["relation_blob"],
         )
 
+    def delete_snapshot_by_id(self, tx: sqlite3.Connection, snapshot_id: str) -> None:
+        tx.execute("DELETE FROM snapshots WHERE id = ?", (snapshot_id,))
+
     def delete_old_snapshots(self, tx: sqlite3.Connection, keep_count: int = 3) -> int:
         rows = tx.execute(
             """

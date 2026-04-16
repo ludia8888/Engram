@@ -130,7 +130,12 @@ class Projector:
         row = self.store.load_latest_snapshot()
         if row is None:
             return False
-        entities, relations = deserialize_snapshot(row.state_blob, row.relation_blob)
+        try:
+            entities, relations = deserialize_snapshot(row.state_blob, row.relation_blob)
+        except Exception:
+            with self.store.transaction() as tx:
+                self.store.delete_snapshot_by_id(tx, row.id)
+            return False
         self._snapshot = MappingProxyType(entities)
         self._relation_snapshot = MappingProxyType(relations)
         self._projection_version = row.projection_version
