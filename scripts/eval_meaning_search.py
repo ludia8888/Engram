@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import tempfile
 from pathlib import Path
 
@@ -29,6 +30,12 @@ def main() -> None:
         default=10,
         help="How many search results to inspect per query.",
     )
+    parser.add_argument(
+        "--format",
+        choices=("text", "json"),
+        default="text",
+        help="Output format for the evaluation report.",
+    )
     args = parser.parse_args()
 
     with tempfile.TemporaryDirectory(prefix="engram-eval-meaning-") as tmpdir:
@@ -45,21 +52,23 @@ def main() -> None:
         append_meaning_search_dataset(meaning, filler_count=args.filler_count)
         meaning.flush("index")
 
-        _print_eval_report(baseline=baseline, meaning=meaning, k=args.k)
+        report = _build_eval_report(baseline=baseline, meaning=meaning, k=args.k)
+        if args.format == "json":
+            print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+        else:
+            _print_eval_report(report)
 
         baseline.close()
         meaning.close()
 
 
-def _print_eval_report(*, baseline: Engram, meaning: Engram, k: int) -> None:
+def _build_eval_report(*, baseline: Engram, meaning: Engram, k: int) -> dict:
     cases = build_meaning_search_cases()
     baseline_top1 = 0
     meaning_top1 = 0
     baseline_rr_total = 0.0
     meaning_rr_total = 0.0
-
-    print("Meaning-aware retrieval eval")
-    print(f"Cases: {len(cases)}")
+    case_reports: list[dict] = []
     for case in cases:
         baseline_results = baseline.search(case.query, k=k)
         meaning_results = meaning.search(case.query, k=k)
@@ -72,33 +81,58 @@ def _print_eval_report(*, baseline: Engram, meaning: Engram, k: int) -> None:
             baseline_top1 += 1
         if meaning_rr == 1.0:
             meaning_top1 += 1
-
-        print(f"\n[{case.name}] {case.description}")
-        print(f"query: {case.query}")
-        print(f"expected: {case.expected_entity_id}")
-        print(
-            "baseline top3: "
-            + ", ".join(_format_result(item) for item in baseline_results[:3])
-        )
-        print(
-            "meaning  top3: "
-            + ", ".join(_format_result(item) for item in meaning_results[:3])
-        )
-        print(
-            f"baseline RR={baseline_rr:.3f} | meaning RR={meaning_rr:.3f}"
+        case_reports.append(
+            {
+                "name": case.name,
+                "description": case.description,
+                "query": case.query,
+                "expected_entity_id": case.expected_entity_id,
+                "baseline_top3": [_format_result(item) for item in baseline_results[:3]],
+                "meaning_top3": [_format_result(item) for item in meaning_results[:3]],
+                "baseline_rr": round(baseline_rr, 6),
+                "meaning_rr": round(meaning_rr, 6),
+            }
         )
 
     case_count = len(cases)
+    return {
+        "case_count": case_count,
+        "cases": case_reports,
+        "summary": {
+            "baseline_top1": baseline_top1,
+            "meaning_top1": meaning_top1,
+            "baseline_top1_rate": baseline_top1 / case_count,
+            "meaning_top1_rate": meaning_top1 / case_count,
+            "baseline_mrr": baseline_rr_total / case_count,
+            "meaning_mrr": meaning_rr_total / case_count,
+        },
+    }
+
+
+def _print_eval_report(report: dict) -> None:
+    print("Meaning-aware retrieval eval")
+    print(f"Cases: {report['case_count']}")
+    for case in report["cases"]:
+        print(f"\n[{case['name']}] {case['description']}")
+        print(f"query: {case['query']}")
+        print(f"expected: {case['expected_entity_id']}")
+        print("baseline top3: " + ", ".join(case["baseline_top3"]))
+        print("meaning  top3: " + ", ".join(case["meaning_top3"]))
+        print(
+            f"baseline RR={case['baseline_rr']:.3f} | "
+            f"meaning RR={case['meaning_rr']:.3f}"
+        )
+    summary = report["summary"]
     print("\nSummary")
     print(
-        f"baseline top1={baseline_top1}/{case_count} "
-        f"({baseline_top1 / case_count:.1%}), "
-        f"MRR={baseline_rr_total / case_count:.3f}"
+        f"baseline top1={summary['baseline_top1']}/{report['case_count']} "
+        f"({summary['baseline_top1_rate']:.1%}), "
+        f"MRR={summary['baseline_mrr']:.3f}"
     )
     print(
-        f"meaning  top1={meaning_top1}/{case_count} "
-        f"({meaning_top1 / case_count:.1%}), "
-        f"MRR={meaning_rr_total / case_count:.3f}"
+        f"meaning  top1={summary['meaning_top1']}/{report['case_count']} "
+        f"({summary['meaning_top1_rate']:.1%}), "
+        f"MRR={summary['meaning_mrr']:.3f}"
     )
 
 

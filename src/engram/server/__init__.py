@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse
 from engram.canonical import Extractor
 from engram.engram import Engram
 from engram.errors import EngramError, QueueFullError, ValidationError, WriterLockError
+from engram.meaning_index import MeaningAnalyzer
 from engram.semantic import Embedder
 
 from .routes import router
@@ -38,6 +39,7 @@ def create_app(
     session_id: str | None = None,
     extractor: Extractor | None = None,
     embedder: Embedder | None = None,
+    meaning_analyzer: MeaningAnalyzer | None = None,
     auto_flush: bool = True,
 ) -> FastAPI:
     config: dict[str, Any] = {
@@ -46,6 +48,7 @@ def create_app(
         "session_id": session_id,
         "extractor": extractor,
         "embedder": embedder,
+        "meaning_analyzer": meaning_analyzer,
         "auto_flush": auto_flush,
     }
 
@@ -67,6 +70,7 @@ def create_app(
             session_id=config["session_id"],
             extractor=config["extractor"],
             embedder=config["embedder"],
+            meaning_analyzer=config["meaning_analyzer"],
             auto_flush=config["auto_flush"],
         )
         app.state.engram = engram

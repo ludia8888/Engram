@@ -5,9 +5,41 @@ import time
 import pytest
 from fastapi.testclient import TestClient
 
+from engram.meaning_index import normalize_query_for_meaning_cache
 from engram.server import create_app
+from engram.types import MeaningAnalysis, MeaningUnit, QueryMeaningPlan
 
 from tests.conftest import dt
+
+
+class StaticMeaningAnalyzer:
+    def __init__(
+        self,
+        *,
+        version: str = "meaning-static-v1",
+        event_units: dict[str, list[MeaningUnit]] | None = None,
+        query_plans: dict[str, QueryMeaningPlan] | None = None,
+    ):
+        self.version = version
+        self._event_units = {
+            key: list(units)
+            for key, units in (event_units or {}).items()
+        }
+        self._query_plans = dict(query_plans or {})
+
+    def analyze_event(self, event):
+        entity_id = str(event.data.get("id", ""))
+        return MeaningAnalysis(units=list(self._event_units.get(entity_id, [])))
+
+    def plan_query(self, query: str) -> QueryMeaningPlan:
+        plan = self._query_plans.get(query)
+        if plan is None:
+            raise AssertionError(f"missing query plan for {query!r}")
+        return QueryMeaningPlan(
+            units=list(plan.units),
+            fallback_terms=list(plan.fallback_terms),
+            planner_confidence=plan.planner_confidence,
+        )
 
 
 def _client(tmp_path, **kwargs) -> TestClient:
@@ -193,6 +225,80 @@ def test_context_returns_plain_text(tmp_path):
         assert resp.status_code == 200
         assert resp.headers["content-type"] == "text/plain; charset=utf-8"
         assert "Busan" in resp.text
+
+
+def test_server_search_can_use_meaning_analyzer(tmp_path):
+    analyzer = StaticMeaningAnalyzer(
+        event_units={
+            "user:zzz-precise": [
+                MeaningUnit(
+                    kind="alias",
+                    value="special traveler",
+                    normalized_value="special traveler",
+                    confidence=1.0,
+                )
+            ],
+            "user:aaa-broad": [
+                MeaningUnit(
+                    kind="facet",
+                    key="city",
+                    value="special",
+                    normalized_value="special",
+                    confidence=1.0,
+                ),
+                MeaningUnit(
+                    kind="facet",
+                    key="role",
+                    value="traveler",
+                    normalized_value="traveler",
+                    confidence=1.0,
+                )
+            ],
+        },
+        query_plans={
+            "special traveler": QueryMeaningPlan(
+                units=[
+                    MeaningUnit(
+                        kind="alias",
+                        value="special traveler",
+                        normalized_value="special traveler",
+                        confidence=1.0,
+                    )
+                ],
+                fallback_terms=["special", "traveler"],
+                planner_confidence=0.96,
+            )
+        },
+    )
+    with _client(tmp_path, meaning_analyzer=analyzer) as client:
+        client.post("/append", json={
+            "event_type": "entity.create",
+            "data": {"id": "user:zzz-precise", "type": "user", "attrs": {"label": "special-traveler", "role": "traveler"}},
+            "observed_at": "2026-05-01T10:00:00Z",
+            "reason": "rare alias entity",
+        })
+        client.post("/append", json={
+            "event_type": "entity.create",
+            "data": {"id": "user:aaa-broad", "type": "user", "attrs": {"city": "special", "role": "traveler"}},
+            "observed_at": "2026-05-01T10:05:00Z",
+            "reason": "common facet entity",
+        })
+        client.post("/flush", json={"level": "index"})
+
+        first = client.get("/search?query=special%20traveler")
+        assert first.status_code == 200
+        cache_key = normalize_query_for_meaning_cache("special traveler")
+        assert _wait_for(
+            lambda: client.app.state.engram.store.load_query_meaning_cache(
+                cache_key,
+                analyzer.version,
+            )
+            is not None
+        )
+
+        second = client.get("/search?query=special%20traveler")
+        assert second.status_code == 200
+        assert second.json()[0]["entity_id"] == "user:zzz-precise"
 
 
 def test_flush_returns_204(tmp_path):

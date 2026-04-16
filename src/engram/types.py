@@ -84,7 +84,7 @@ class ExtractedEvent:
     time_confidence: TimeConfidence = "unknown"
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
 class MeaningUnit:
     kind: MeaningUnitKind
     value: str
@@ -94,12 +94,12 @@ class MeaningUnit:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
 class MeaningAnalysis:
     units: list[MeaningUnit]
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
 class QueryMeaningPlan:
     units: list[MeaningUnit]
     fallback_terms: list[str]

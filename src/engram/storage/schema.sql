@@ -139,3 +139,6 @@ CREATE TABLE IF NOT EXISTS query_meaning_cache (
     cached_at          TEXT NOT NULL,
     PRIMARY KEY(normalized_query, analyzer_version)
 );
+
+CREATE INDEX IF NOT EXISTS idx_query_meaning_cache_version_cached_at
+    ON query_meaning_cache(analyzer_version, cached_at DESC, normalized_query ASC);

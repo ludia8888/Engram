@@ -109,16 +109,10 @@ def _run_for_entity_count(*, entity_count: int, repeat: int) -> None:
 
 def _run_cold_search(mem: Engram, query: str) -> None:
     with mem.store.transaction() as tx:
-        tx.execute(
-            """
-            DELETE FROM query_meaning_cache
-            WHERE normalized_query = ?
-              AND analyzer_version = ?
-            """,
-            (
-                normalize_query_for_meaning_cache(query),
-                mem.meaning_analyzer.version,
-            ),
+        mem.store.clear_query_meaning_cache(
+            tx,
+            analyzer_version=mem.meaning_analyzer.version,
+            normalized_query=normalize_query_for_meaning_cache(query),
         )
     mem.search(query, k=5)
 

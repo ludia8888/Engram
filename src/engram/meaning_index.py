@@ -63,6 +63,7 @@ class MeaningIndexer:
         processed_at = utcnow()
         unit_rows: list[tuple[str, str, str, str | None, str, str, float | None, str | None]] = []
         run_rows: list[MeaningAnalysisRun] = []
+        succeeded_event_ids: list[str] = []
 
         for event in events:
             try:
@@ -93,6 +94,7 @@ class MeaningIndexer:
                         json.dumps(unit.metadata, ensure_ascii=False, sort_keys=True) if unit.metadata else None,
                     )
                 )
+            succeeded_event_ids.append(event.id)
             run_rows.append(
                 MeaningAnalysisRun(
                     event_id=event.id,
@@ -105,7 +107,12 @@ class MeaningIndexer:
             )
 
         with self.store.transaction() as tx:
-            self.store.replace_event_search_units(tx, self.analyzer.version, unit_rows)
+            self.store.replace_event_search_units(
+                tx,
+                self.analyzer.version,
+                succeeded_event_ids,
+                unit_rows,
+            )
             self.store.append_meaning_analysis_runs(tx, run_rows)
         return len(run_rows)
 

@@ -426,7 +426,6 @@ class EventStore:
             LEFT JOIN meaning_analysis_runs r
               ON r.event_id = e.id
              AND r.analyzer_version = ?
-             AND r.status = 'SUCCEEDED'
             WHERE r.event_id IS NULL
             ORDER BY e.seq ASC
             """,
@@ -438,11 +437,12 @@ class EventStore:
         self,
         tx: sqlite3.Connection,
         analyzer_version: str,
+        event_ids: list[str],
         rows: list[tuple[str, str, str, str | None, str, str, float | None, str | None]],
     ) -> None:
-        if not rows:
+        if not event_ids:
             return
-        event_ids = sorted({event_id for event_id, *_ in rows})
+        event_ids = sorted(set(event_ids))
         placeholders = ",".join("?" for _ in event_ids)
         tx.execute(
             f"""
@@ -537,6 +537,76 @@ class EventStore:
             (normalized_query, analyzer_version, payload, cached_at),
         )
 
+    def clear_query_meaning_cache(
+        self,
+        tx: sqlite3.Connection,
+        *,
+        analyzer_version: str | None = None,
+        normalized_query: str | None = None,
+    ) -> int:
+        clauses: list[str] = []
+        params: list[object] = []
+        if analyzer_version is not None:
+            clauses.append("analyzer_version = ?")
+            params.append(analyzer_version)
+        if normalized_query is not None:
+            clauses.append("normalized_query = ?")
+            params.append(normalized_query)
+        where_sql = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        result = tx.execute(
+            f"DELETE FROM query_meaning_cache{where_sql}",
+            params,
+        )
+        return int(result.rowcount or 0)
+
+    def prune_query_meaning_cache(
+        self,
+        tx: sqlite3.Connection,
+        *,
+        analyzer_version: str,
+        keep_count: int,
+    ) -> int:
+        if keep_count <= 0:
+            result = tx.execute(
+                "DELETE FROM query_meaning_cache WHERE analyzer_version = ?",
+                (analyzer_version,),
+            )
+            return int(result.rowcount or 0)
+
+        rows = tx.execute(
+            """
+            SELECT normalized_query
+            FROM query_meaning_cache
+            WHERE analyzer_version = ?
+            ORDER BY cached_at DESC, normalized_query ASC
+            LIMIT -1 OFFSET ?
+            """,
+            (analyzer_version, keep_count),
+        ).fetchall()
+        if not rows:
+            return 0
+        normalized_queries = [str(row["normalized_query"]) for row in rows]
+        placeholders = ",".join("?" for _ in normalized_queries)
+        result = tx.execute(
+            f"""
+            DELETE FROM query_meaning_cache
+            WHERE analyzer_version = ?
+              AND normalized_query IN ({placeholders})
+            """,
+            [analyzer_version, *normalized_queries],
+        )
+        return int(result.rowcount or 0)
+
+    def count_query_meaning_cache(self, analyzer_version: str | None = None) -> int:
+        if analyzer_version is None:
+            row = self._reader_conn.execute("SELECT COUNT(*) FROM query_meaning_cache").fetchone()
+        else:
+            row = self._reader_conn.execute(
+                "SELECT COUNT(*) FROM query_meaning_cache WHERE analyzer_version = ?",
+                (analyzer_version,),
+            ).fetchone()
+        return int(row[0]) if row is not None else 0
+
     def event_meaning_matches(
         self,
         analyzer_version: str,
@@ -620,6 +690,33 @@ class EventStore:
             ): int(row["df"])
             for row in rows
         }
+
+    def meaning_match_snapshot(
+        self,
+        analyzer_version: str,
+        lookups: list[tuple[str, str, str]],
+    ) -> tuple[
+        dict[str, list[tuple[str, str, str, float | None]]],
+        int,
+        dict[tuple[str, str, str], int],
+    ]:
+        if not lookups:
+            return {}, 0, {}
+        conn = self._reader_conn
+        conn.execute("SAVEPOINT meaning_match_snapshot")
+        try:
+            matches = self.event_meaning_matches(analyzer_version, lookups)
+            corpus_size = self.meaning_analyzer_document_count(analyzer_version)
+            document_frequencies = self.meaning_unit_document_frequencies(
+                analyzer_version,
+                lookups,
+            )
+        except Exception:
+            conn.execute("ROLLBACK TO SAVEPOINT meaning_match_snapshot")
+            conn.execute("RELEASE SAVEPOINT meaning_match_snapshot")
+            raise
+        conn.execute("RELEASE SAVEPOINT meaning_match_snapshot")
+        return matches, corpus_size, document_frequencies
 
     def candidate_event_ids_for_search_terms(self, terms: list[str]) -> list[str]:
         if not terms:

@@ -4,7 +4,10 @@ from collections import defaultdict
 from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime
+import logging
 import math
+import queue
+import threading
 from typing import Callable, Literal
 
 from .meaning_index import (
@@ -54,12 +57,16 @@ _LEXICAL_WEIGHT = 0.6
 _SEMANTIC_MIN_SCORE = 0.35
 _CAUSAL_WEIGHT = 0.5
 _QUERY_EMBED_CACHE_SIZE = 128
+_QUERY_MEANING_CACHE_MAX_ROWS = 5000
+_QUERY_PLAN_WORKER_TIMEOUT_SECS = 0.2
 _MEANING_KIND_WEIGHTS: dict[str, float] = {
     "protected_phrase": 2.0,
     "canonical_key": 1.7,
     "alias": 1.4,
     "facet": 0.8,
 }
+
+logger = logging.getLogger(__name__)
 
 
 class RetrievalEngine:
@@ -74,6 +81,27 @@ class RetrievalEngine:
         self.meaning_analyzer = meaning_analyzer or NullMeaningAnalyzer()
         self._fallback_meaning_analyzer = NullMeaningAnalyzer()
         self._query_embedding_cache: OrderedDict[tuple[str, str], list[float]] = OrderedDict()
+        self._query_plan_queue: queue.Queue[tuple[str, str] | None] | None = None
+        self._query_plan_stop_event = threading.Event()
+        self._query_plan_thread: threading.Thread | None = None
+        self._pending_query_plans: set[tuple[str, str]] = set()
+        self._pending_query_plans_lock = threading.Lock()
+        if not isinstance(self.meaning_analyzer, NullMeaningAnalyzer):
+            self._query_plan_queue = queue.Queue()
+            self._query_plan_thread = threading.Thread(
+                target=self._query_plan_loop,
+                name="engram-query-meaning-planner",
+                daemon=True,
+            )
+            self._query_plan_thread.start()
+
+    def close(self) -> None:
+        self._query_plan_stop_event.set()
+        if self._query_plan_queue is not None:
+            self._query_plan_queue.put(None)
+        if self._query_plan_thread is not None:
+            self._query_plan_thread.join(timeout=5.0)
+            self._query_plan_thread = None
 
     def search_known(
         self,
@@ -327,26 +355,13 @@ class RetrievalEngine:
         if cached is not None:
             return deserialize_query_meaning_plan(cached)
 
-        try:
-            plan = self.meaning_analyzer.plan_query(query)
-        except Exception:
+        if isinstance(self.meaning_analyzer, NullMeaningAnalyzer):
             plan = self._fallback_meaning_analyzer.plan_query(query)
-        if not plan.fallback_terms:
-            plan = QueryMeaningPlan(
-                units=list(plan.units),
-                fallback_terms=query_candidate_terms(query),
-                planner_confidence=plan.planner_confidence,
-            )
+            self._persist_query_meaning_cache(normalized_query, plan)
+            return plan
 
-        with self.store.transaction() as tx:
-            self.store.save_query_meaning_cache(
-                tx,
-                normalized_query=normalized_query,
-                analyzer_version=self.meaning_analyzer.version,
-                payload=serialize_query_meaning_plan(plan),
-                cached_at=to_rfc3339(utcnow()),
-            )
-        return plan
+        self._schedule_query_plan(query, normalized_query)
+        return self._fallback_meaning_analyzer.plan_query(query)
 
     def _meaning_direct_matches(
         self,
@@ -359,15 +374,12 @@ class RetrievalEngine:
         if not lookups:
             return None
 
-        matches = self.store.event_meaning_matches(self.meaning_analyzer.version, lookups)
-        if not matches:
-            return None
-
-        corpus_size = self.store.meaning_analyzer_document_count(self.meaning_analyzer.version)
-        document_frequencies = self.store.meaning_unit_document_frequencies(
+        matches, corpus_size, document_frequencies = self.store.meaning_match_snapshot(
             self.meaning_analyzer.version,
             lookups,
         )
+        if not matches:
+            return None
 
         direct_events = visible_events_provider(time_window, sorted(matches))
         if not direct_events:
@@ -586,6 +598,61 @@ class RetrievalEngine:
         while len(self._query_embedding_cache) > _QUERY_EMBED_CACHE_SIZE:
             self._query_embedding_cache.popitem(last=False)
         return vector
+
+    def _persist_query_meaning_cache(
+        self,
+        normalized_query: str,
+        plan: QueryMeaningPlan,
+    ) -> None:
+        with self.store.transaction() as tx:
+            self.store.save_query_meaning_cache(
+                tx,
+                normalized_query=normalized_query,
+                analyzer_version=self.meaning_analyzer.version,
+                payload=serialize_query_meaning_plan(plan),
+                cached_at=to_rfc3339(utcnow()),
+            )
+            self.store.prune_query_meaning_cache(
+                tx,
+                analyzer_version=self.meaning_analyzer.version,
+                keep_count=_QUERY_MEANING_CACHE_MAX_ROWS,
+            )
+
+    def _schedule_query_plan(self, query: str, normalized_query: str) -> None:
+        if self._query_plan_queue is None:
+            return
+        cache_key = (self.meaning_analyzer.version, normalized_query)
+        with self._pending_query_plans_lock:
+            if cache_key in self._pending_query_plans:
+                return
+            self._pending_query_plans.add(cache_key)
+        self._query_plan_queue.put((query, normalized_query))
+
+    def _query_plan_loop(self) -> None:
+        assert self._query_plan_queue is not None
+        while not self._query_plan_stop_event.is_set():
+            try:
+                item = self._query_plan_queue.get(timeout=_QUERY_PLAN_WORKER_TIMEOUT_SECS)
+            except queue.Empty:
+                continue
+            if item is None:
+                continue
+            query, normalized_query = item
+            cache_key = (self.meaning_analyzer.version, normalized_query)
+            try:
+                plan = self.meaning_analyzer.plan_query(query)
+                if not plan.fallback_terms:
+                    plan = QueryMeaningPlan(
+                        units=list(plan.units),
+                        fallback_terms=query_candidate_terms(query),
+                        planner_confidence=plan.planner_confidence,
+                    )
+                self._persist_query_meaning_cache(normalized_query, plan)
+            except Exception:
+                logger.exception("query meaning planning failed for %s", normalized_query)
+            finally:
+                with self._pending_query_plans_lock:
+                    self._pending_query_plans.discard(cache_key)
 
 
 def _score_event_lexical(event: Event, tokens: list[QueryToken]) -> float:

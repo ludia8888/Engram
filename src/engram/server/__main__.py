@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 
 from engram.canonical import NullExtractor
+from engram.meaning_index import NullMeaningAnalyzer
 from engram.semantic import HashEmbedder
 
 
@@ -38,6 +39,21 @@ def _build_embedder():
     raise ValueError(f"Unknown embedder: {name}")
 
 
+def _build_meaning_analyzer():
+    name = os.environ.get("ENGRAM_MEANING_ANALYZER", "null")
+    if name == "null":
+        return NullMeaningAnalyzer()
+    if name == "openai":
+        from engram.openai_meaning_analyzer import OpenAIMeaningAnalyzer
+
+        return OpenAIMeaningAnalyzer(
+            api_key=os.environ.get("OPENAI_API_KEY"),
+            model=os.environ.get("ENGRAM_OPENAI_MEANING_MODEL", "gpt-5.4-mini"),
+            base_url=os.environ.get("ENGRAM_OPENAI_BASE_URL"),
+        )
+    raise ValueError(f"Unknown meaning analyzer: {name}")
+
+
 def main() -> None:
     import uvicorn
 
@@ -49,6 +65,7 @@ def main() -> None:
         session_id=os.environ.get("ENGRAM_SESSION_ID"),
         extractor=_build_extractor(),
         embedder=_build_embedder(),
+        meaning_analyzer=_build_meaning_analyzer(),
         auto_flush=os.environ.get("ENGRAM_AUTO_FLUSH", "true").lower() in ("true", "1", "yes"),
     )
     uvicorn.run(

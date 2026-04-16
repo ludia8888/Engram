@@ -1,14 +1,26 @@
 from __future__ import annotations
 
+import threading
+import time
 import types
 
 from engram import Engram, OpenAIMeaningAnalyzer
 import engram.engram as engram_module
+from engram.meaning_index import normalize_query_for_meaning_cache
 import engram.openai_meaning_analyzer as openai_meaning_module
 import engram.retrieval as retrieval_module
 from engram.types import MeaningAnalysis, MeaningUnit, QueryMeaningPlan
 
 from tests.conftest import dt
+
+
+def _wait_for(pred, timeout=5.0, interval=0.05):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if pred():
+            return True
+        time.sleep(interval)
+    return False
 
 
 class StaticMeaningAnalyzer:
@@ -62,6 +74,18 @@ class StaticMeaningAnalyzer:
             confidence=unit.confidence,
             metadata=dict(unit.metadata),
         )
+
+
+class BlockingMeaningAnalyzer(StaticMeaningAnalyzer):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def plan_query(self, query: str) -> QueryMeaningPlan:
+        self.started.set()
+        self.release.wait(timeout=5.0)
+        return super().plan_query(query)
 
 
 def test_search_returns_entity_seeded_by_matching_events(tmp_path):
@@ -313,6 +337,14 @@ def test_search_prefers_protected_phrase_meaning_hits_over_fallback_token_matche
     )
     mem.flush("index")
 
+    mem.search("Busan-1499 traveler", k=5)
+    assert _wait_for(
+        lambda: mem.store.load_query_meaning_cache(
+            normalize_query_for_meaning_cache("Busan-1499 traveler"),
+            analyzer.version,
+        )
+        is not None
+    )
     results = mem.search("Busan-1499 traveler", k=5)
 
     assert results
@@ -359,6 +391,13 @@ def test_search_caches_query_meaning_plan_between_calls(tmp_path):
     mem.flush("index")
 
     first = mem.search("Busan-1499", k=5)
+    assert _wait_for(
+        lambda: mem.store.load_query_meaning_cache(
+            normalize_query_for_meaning_cache("Busan-1499"),
+            analyzer.version,
+        )
+        is not None
+    )
     second = mem.search("Busan-1499", k=5)
 
     assert first
@@ -366,6 +405,65 @@ def test_search_caches_query_meaning_plan_between_calls(tmp_path):
     assert first[0].entity_id == "user:precise"
     assert second[0].entity_id == "user:precise"
     assert analyzer.plan_calls == ["Busan-1499"]
+
+    mem.close()
+
+
+def test_search_cache_miss_does_not_block_on_meaning_planner(tmp_path):
+    analyzer = BlockingMeaningAnalyzer(
+        event_units={
+            "user:precise": [
+                MeaningUnit(
+                    kind="alias",
+                    value="special traveler",
+                    normalized_value="special traveler",
+                    confidence=1.0,
+                )
+            ]
+        },
+        query_plans={
+            "special traveler": QueryMeaningPlan(
+                units=[
+                    MeaningUnit(
+                        kind="alias",
+                        value="special traveler",
+                        normalized_value="special traveler",
+                        confidence=1.0,
+                    )
+                ],
+                fallback_terms=["special", "traveler"],
+                planner_confidence=0.95,
+            )
+        },
+    )
+    mem = Engram(user_id="alice", path=str(tmp_path), meaning_analyzer=analyzer)
+    mem.append(
+        "entity.create",
+        {"id": "user:precise", "type": "user", "attrs": {"label": "special-traveler"}},
+        observed_at=dt("2026-05-01T10:00:00Z"),
+        reason="rare alias entity",
+    )
+    mem.flush("index")
+
+    started = time.monotonic()
+    first = mem.search("special traveler", k=5)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 0.5
+    assert first
+    assert analyzer.started.wait(timeout=1.0)
+
+    analyzer.release.set()
+    assert _wait_for(
+        lambda: mem.store.load_query_meaning_cache(
+            normalize_query_for_meaning_cache("special traveler"),
+            analyzer.version,
+        )
+        is not None
+    )
+
+    second = mem.search("special traveler", k=5)
+    assert second[0].entity_id == "user:precise"
 
     mem.close()
 
@@ -443,9 +541,17 @@ def test_search_meaning_idf_prefers_rare_alias_over_multiple_common_facets(tmp_p
             {"id": f"user:broad:{index}", "type": "user", "attrs": {"role": "traveler", "category": "user"}},
             observed_at=dt(f"2026-05-01T10:{index + 1:02d}:00Z"),
             reason="common facet entity",
-        )
+    )
     mem.flush("index")
 
+    mem.search("special traveler", k=5)
+    assert _wait_for(
+        lambda: mem.store.load_query_meaning_cache(
+            normalize_query_for_meaning_cache("special traveler"),
+            analyzer.version,
+        )
+        is not None
+    )
     results = mem.search("special traveler", k=5)
 
     assert results
@@ -513,10 +619,92 @@ def test_search_uses_openai_meaning_analyzer_end_to_end(tmp_path, monkeypatch):
     )
     mem.flush("index")
 
+    mem.search("Busan-1499 traveler", k=5)
+    assert _wait_for(
+        lambda: mem.store.load_query_meaning_cache(
+            normalize_query_for_meaning_cache("Busan-1499 traveler"),
+            analyzer.version,
+        )
+        is not None
+    )
     results = mem.search("Busan-1499 traveler", k=5)
 
     assert results
     assert results[0].entity_id == "user:precise"
+
+    mem.close()
+
+
+def test_failed_meaning_analysis_is_not_retried_forever(tmp_path):
+    class FailingMeaningAnalyzer:
+        version = "meaning-fail-once-v1"
+
+        def __init__(self):
+            self.analyze_calls = 0
+
+        def analyze_event(self, event):
+            self.analyze_calls += 1
+            raise RuntimeError("boom")
+
+        def plan_query(self, query: str) -> QueryMeaningPlan:
+            return QueryMeaningPlan(units=[], fallback_terms=["boom"], planner_confidence=None)
+
+    analyzer = FailingMeaningAnalyzer()
+    mem = Engram(user_id="alice", path=str(tmp_path), meaning_analyzer=analyzer)
+    mem.append(
+        "entity.create",
+        {"id": "user:alice", "type": "user", "attrs": {"label": "Busan"}},
+        observed_at=dt("2026-05-01T10:00:00Z"),
+    )
+
+    mem.flush("index")
+    mem.flush("index")
+
+    assert analyzer.analyze_calls == 1
+    status_row = mem.store._reader_conn.execute(
+        "SELECT status FROM meaning_analysis_runs WHERE analyzer_version = ?",
+        (analyzer.version,),
+    ).fetchone()
+    assert status_row is not None
+    assert status_row["status"] == "FAILED"
+
+    mem.close()
+
+
+def test_query_meaning_cache_is_pruned(tmp_path, monkeypatch):
+    monkeypatch.setattr(retrieval_module, "_QUERY_MEANING_CACHE_MAX_ROWS", 2)
+    analyzer = StaticMeaningAnalyzer(
+        query_plans={
+            "query-one": QueryMeaningPlan(units=[], fallback_terms=["query-one"], planner_confidence=0.9),
+            "query-two": QueryMeaningPlan(units=[], fallback_terms=["query-two"], planner_confidence=0.9),
+            "query-three": QueryMeaningPlan(units=[], fallback_terms=["query-three"], planner_confidence=0.9),
+        }
+    )
+    mem = Engram(user_id="alice", path=str(tmp_path), meaning_analyzer=analyzer)
+
+    for query in ("query-one", "query-two", "query-three"):
+        mem.search(query, k=5)
+        assert _wait_for(
+            lambda query=query: mem.store.load_query_meaning_cache(
+                normalize_query_for_meaning_cache(query),
+                analyzer.version,
+            )
+            is not None
+        )
+
+    assert mem.store.count_query_meaning_cache(analyzer.version) == 2
+    assert mem.store.load_query_meaning_cache(
+        normalize_query_for_meaning_cache("query-one"),
+        analyzer.version,
+    ) is None
+    assert mem.store.load_query_meaning_cache(
+        normalize_query_for_meaning_cache("query-two"),
+        analyzer.version,
+    ) is not None
+    assert mem.store.load_query_meaning_cache(
+        normalize_query_for_meaning_cache("query-three"),
+        analyzer.version,
+    ) is not None
 
     mem.close()
 

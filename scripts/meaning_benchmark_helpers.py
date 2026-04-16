@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
+from engram.meaning_index import normalize_query_for_meaning_cache
+from engram.search_terms import query_candidate_terms
 from engram.types import MeaningAnalysis, MeaningUnit, QueryMeaningPlan
 
 
@@ -43,7 +45,20 @@ class BenchmarkMeaningAnalyzer:
         self.plan_calls.append(query)
         plan = self._query_plans.get(query)
         if plan is None:
-            raise AssertionError(f"missing query plan for {query!r}")
+            terms = query_candidate_terms(query)
+            return QueryMeaningPlan(
+                units=[
+                    MeaningUnit(
+                        kind="fallback_term",
+                        value=term,
+                        normalized_value=normalize_query_for_meaning_cache(term),
+                        confidence=1.0,
+                    )
+                    for term in terms
+                ],
+                fallback_terms=terms,
+                planner_confidence=None,
+            )
         return self._clone_plan(plan)
 
     def _clone_plan(self, plan: QueryMeaningPlan) -> QueryMeaningPlan:
