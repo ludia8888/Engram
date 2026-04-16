@@ -32,7 +32,7 @@ def _build_extractor():
 
         return OpenAIExtractor(
             api_key=os.environ.get("OPENAI_API_KEY"),
-            model=os.environ.get("ENGRAM_OPENAI_MODEL", "gpt-4o-mini"),
+            model=os.environ.get("ENGRAM_OPENAI_MODEL", "gpt-5.4-mini"),
             base_url=os.environ.get("ENGRAM_OPENAI_BASE_URL"),
         )
     raise ValueError(f"Unknown extractor: {name}")
@@ -64,7 +64,7 @@ def _build_meaning_analyzer():
 
         return OpenAIMeaningAnalyzer(
             api_key=os.environ.get("OPENAI_API_KEY"),
-            model=os.environ.get("ENGRAM_OPENAI_MEANING_MODEL", "gpt-4o-mini"),
+            model=os.environ.get("ENGRAM_OPENAI_MEANING_MODEL", "gpt-5.4-mini"),
             base_url=os.environ.get("ENGRAM_OPENAI_BASE_URL"),
         )
     raise ValueError(f"Unknown meaning analyzer: {name}")
@@ -73,6 +73,7 @@ def _build_meaning_analyzer():
 def cmd_turn(args) -> None:
     mem = _build_engram(args)
     ack = mem.turn(user=args.user, assistant=args.assistant)
+    mem.flush("all")
     print(json.dumps({
         "turn_id": ack.turn_id,
         "observed_at": to_rfc3339(ack.observed_at),
@@ -89,6 +90,7 @@ def cmd_append(args) -> None:
         data=data,
         reason=args.reason,
     )
+    mem.flush("all")
     print(json.dumps({"event_id": event_id}, indent=2))
     mem.close()
 

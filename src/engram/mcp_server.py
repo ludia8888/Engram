@@ -49,7 +49,7 @@ def _build_extractor():
 
         return OpenAIExtractor(
             api_key=os.environ.get("OPENAI_API_KEY"),
-            model=os.environ.get("ENGRAM_OPENAI_MODEL", "gpt-4o-mini"),
+            model=os.environ.get("ENGRAM_OPENAI_MODEL", "gpt-5.4-mini"),
             base_url=os.environ.get("ENGRAM_OPENAI_BASE_URL"),
         )
     raise ValueError(f"Unknown extractor: {name}")
@@ -81,7 +81,7 @@ def _build_meaning_analyzer():
 
         return OpenAIMeaningAnalyzer(
             api_key=os.environ.get("OPENAI_API_KEY"),
-            model=os.environ.get("ENGRAM_OPENAI_MEANING_MODEL", "gpt-4o-mini"),
+            model=os.environ.get("ENGRAM_OPENAI_MEANING_MODEL", "gpt-5.4-mini"),
             base_url=os.environ.get("ENGRAM_OPENAI_BASE_URL"),
         )
     raise ValueError(f"Unknown meaning analyzer: {name}")
