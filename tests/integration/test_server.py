@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 
 import pytest
-from starlette.testclient import TestClient
+from fastapi.testclient import TestClient
 
 from engram.server import create_app
 

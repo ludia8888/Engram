@@ -3,7 +3,7 @@ from __future__ import annotations
 import atexit
 import threading
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Any, Callable
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -16,6 +16,20 @@ from engram.semantic import Embedder
 from .routes import router
 
 _cleanup_lock = threading.Lock()
+
+
+def _register_atexit_cleanup(cleanup: Callable[[], None]) -> Callable[[], None]:
+    registered = True
+    atexit.register(cleanup)
+
+    def unregister() -> None:
+        nonlocal registered
+        if not registered:
+            return
+        registered = False
+        atexit.unregister(cleanup)
+
+    return unregister
 
 
 def create_app(
@@ -57,12 +71,12 @@ def create_app(
         )
         app.state.engram = engram
         app.state.config = config
-        atexit.register(cleanup)
+        unregister_cleanup = _register_atexit_cleanup(cleanup)
         try:
             yield
         finally:
             cleanup()
-            atexit.unregister(cleanup)
+            unregister_cleanup()
 
     app = FastAPI(title="Engram", version="0.1.0", lifespan=lifespan)
     app.include_router(router)
