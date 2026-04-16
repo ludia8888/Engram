@@ -988,9 +988,13 @@ class EventStore:
             f"""
             SELECT DISTINCT ee.event_id
             FROM event_entities ee
-            JOIN vec_events v ON v.event_id = ee.event_id
             WHERE ee.entity_id IN ({placeholders})
-              AND v.embedder_version = ?
+              AND EXISTS (
+                SELECT 1
+                FROM vec_events v
+                WHERE v.event_id = ee.event_id
+                  AND v.embedder_version = ?
+              )
             ORDER BY ee.event_id ASC
             """,
             [*entity_ids, embedder_version],
@@ -1537,4 +1541,3 @@ class EventStore:
             superseded_at=from_rfc3339(row["superseded_at"]) if row["superseded_at"] else None,
             projection_version=int(row["projection_version"]) if row["projection_version"] is not None else None,
         )
-

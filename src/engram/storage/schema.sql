@@ -55,6 +55,7 @@ CREATE TABLE IF NOT EXISTS event_entities (
 );
 
 CREATE INDEX IF NOT EXISTS idx_event_entities_entity ON event_entities(entity_id);
+CREATE INDEX IF NOT EXISTS idx_event_entities_entity_event ON event_entities(entity_id, event_id);
 
 CREATE TABLE IF NOT EXISTS dirty_ranges (
     id                 TEXT PRIMARY KEY,
@@ -87,6 +88,7 @@ CREATE TABLE IF NOT EXISTS vec_events (
 );
 
 CREATE INDEX IF NOT EXISTS idx_vec_events_version ON vec_events(embedder_version);
+CREATE INDEX IF NOT EXISTS idx_vec_events_version_event ON vec_events(embedder_version, event_id);
 
 CREATE TABLE IF NOT EXISTS event_search_terms (
     event_id     TEXT NOT NULL,
