@@ -423,6 +423,83 @@ class EventStore:
         ).fetchall()
         return [str(row["event_id"]) for row in rows]
 
+    def known_visible_event_token_hits(
+        self,
+        recorded_at: str,
+        token_term_groups: list[tuple[str, ...]],
+        *,
+        from_recorded_at: str | None = None,
+    ) -> dict[str, int]:
+        if not token_term_groups:
+            return {}
+
+        ordered_terms: list[str] = []
+        term_to_token_indexes: dict[str, set[int]] = {}
+        for token_index, terms in enumerate(token_term_groups):
+            for term in terms:
+                indexes = term_to_token_indexes.setdefault(term, set())
+                if not indexes:
+                    ordered_terms.append(term)
+                indexes.add(token_index)
+
+        placeholders = ",".join("?" for _ in ordered_terms)
+        if from_recorded_at is None:
+            rows = self._reader_conn.execute(
+                f"""
+                SELECT events.id AS event_id, t.term
+                FROM events
+                JOIN event_search_terms t ON t.event_id = events.id
+                LEFT JOIN extraction_runs r ON r.id = events.extraction_run_id
+                WHERE events.recorded_at <= ?
+                  AND t.term IN ({placeholders})
+                  AND (
+                    events.extraction_run_id IS NULL
+                    OR (
+                        r.status = 'SUCCEEDED'
+                        AND r.processed_at <= ?
+                        AND (r.superseded_at IS NULL OR r.superseded_at > ?)
+                    )
+                  )
+                ORDER BY events.id ASC
+                """,
+                (recorded_at, *ordered_terms, recorded_at, recorded_at),
+            ).fetchall()
+        else:
+            rows = self._reader_conn.execute(
+                f"""
+                SELECT events.id AS event_id, t.term
+                FROM events
+                JOIN event_search_terms t ON t.event_id = events.id
+                LEFT JOIN extraction_runs r ON r.id = events.extraction_run_id
+                WHERE events.recorded_at >= ?
+                  AND events.recorded_at <= ?
+                  AND t.term IN ({placeholders})
+                  AND (
+                    events.extraction_run_id IS NULL
+                    OR (
+                        r.status = 'SUCCEEDED'
+                        AND r.processed_at <= ?
+                        AND (r.superseded_at IS NULL OR r.superseded_at > ?)
+                    )
+                  )
+                ORDER BY events.id ASC
+                """,
+                (from_recorded_at, recorded_at, *ordered_terms, recorded_at, recorded_at),
+            ).fetchall()
+
+        matched_token_indexes_by_event: dict[str, set[int]] = {}
+        for row in rows:
+            event_id = str(row["event_id"])
+            token_indexes = term_to_token_indexes.get(str(row["term"]))
+            if not token_indexes:
+                continue
+            matched_token_indexes_by_event.setdefault(event_id, set()).update(token_indexes)
+        return {
+            event_id: len(token_indexes)
+            for event_id, token_indexes in matched_token_indexes_by_event.items()
+            if token_indexes
+        }
+
     def event_ids_with_embeddings(self, embedder_version: str) -> list[str]:
         rows = self._reader_conn.execute(
             """
@@ -1460,5 +1537,4 @@ class EventStore:
             superseded_at=from_rfc3339(row["superseded_at"]) if row["superseded_at"] else None,
             projection_version=int(row["projection_version"]) if row["projection_version"] is not None else None,
         )
-
 

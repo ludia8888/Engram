@@ -65,11 +65,13 @@ def query_tokens(query: str) -> list[QueryToken]:
 
 def query_candidate_terms(query: str) -> list[str]:
     candidates: list[str] = []
-    for token in query_tokens(query):
-        candidates.extend(token.variants)
-        for variant in token.variants:
-            candidates.extend(_split_token_parts(variant))
+    for token_terms in query_token_term_groups(query):
+        candidates.extend(token_terms)
     return list(dict.fromkeys(candidates))
+
+
+def query_token_term_groups(query: str) -> list[tuple[str, ...]]:
+    return [_token_term_group(token) for token in query_tokens(query)]
 
 
 def event_search_terms(event: Event) -> list[str]:
@@ -85,6 +87,14 @@ def search_terms_from_text(text: str) -> list[str]:
         terms.extend(_token_variants(token))
         terms.extend(_split_token_parts(token))
     return list(dict.fromkeys(term for term in terms if term))
+
+
+def _token_term_group(token: QueryToken) -> tuple[str, ...]:
+    terms: list[str] = []
+    terms.extend(token.variants)
+    for variant in token.variants:
+        terms.extend(_split_token_parts(variant))
+    return tuple(dict.fromkeys(term for term in terms if term))
 
 
 def _token_variants(token: str) -> tuple[str, ...]:

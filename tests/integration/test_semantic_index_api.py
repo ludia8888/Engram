@@ -585,7 +585,7 @@ def test_query_embedding_cache_normalizes_query_text_before_embedding(tmp_path):
     mem.close()
 
 
-def test_search_passes_candidate_ids_into_visible_event_fetch(tmp_path, monkeypatch):
+def test_search_fetches_only_known_lexical_candidates(tmp_path, monkeypatch):
     mem = Engram(
         user_id="alice",
         path=str(tmp_path),
@@ -608,21 +608,25 @@ def test_search_passes_candidate_ids_into_visible_event_fetch(tmp_path, monkeypa
     )
     mem.flush("index")
 
-    original_visible_events_known = mem.store.visible_events_known
-    captured_event_ids: list[list[str] | None] = []
+    original_token_hits = mem.store.known_visible_event_token_hits
+    original_events_by_ids = mem.store.events_by_ids
+    captured_event_ids: list[list[str]] = []
 
-    def spy_visible_events_known(recorded_at, from_recorded_at=None, event_ids=None):
-        captured_event_ids.append(list(event_ids) if event_ids is not None else None)
-        return original_visible_events_known(recorded_at, from_recorded_at=from_recorded_at, event_ids=event_ids)
+    def spy_known_visible_event_token_hits(recorded_at, token_term_groups, from_recorded_at=None):
+        return original_token_hits(recorded_at, token_term_groups, from_recorded_at=from_recorded_at)
 
-    monkeypatch.setattr(mem.store, "visible_events_known", spy_visible_events_known)
+    def spy_events_by_ids(event_ids):
+        captured_event_ids.append(list(event_ids))
+        return original_events_by_ids(event_ids)
+
+    monkeypatch.setattr(mem.store, "known_visible_event_token_hits", spy_known_visible_event_token_hits)
+    monkeypatch.setattr(mem.store, "events_by_ids", spy_events_by_ids)
 
     results = mem.search("Busan", k=5)
 
     assert results
     assert results[0].entity_id == "user:alice"
     assert captured_event_ids
-    assert captured_event_ids[0] is not None
     assert captured_event_ids[0] == [event_id]
     assert other_event_id not in captured_event_ids[0]
 

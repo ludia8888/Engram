@@ -6,7 +6,13 @@ from datetime import datetime
 from collections import OrderedDict
 from typing import Callable, Literal
 
-from .search_terms import QueryToken, event_search_text, query_candidate_terms, query_tokens
+from .search_terms import (
+    QueryToken,
+    event_search_text,
+    query_candidate_terms,
+    query_token_term_groups,
+    query_tokens,
+)
 from .semantic import Embedder, cosine_similarity
 from .storage.store import (
     EventStore,
@@ -99,23 +105,40 @@ class RetrievalEngine:
             return []
 
         tokens = query_tokens(query)
-        lexical_candidate_ids = set(
-            self.store.candidate_event_ids_for_search_terms(query_candidate_terms(query))
-        )
         direct_events: list[Event]
         lexical_scores: dict[str, float]
+        lexical_token_hits = self._known_visible_lexical_candidate_hits(query, time_window) if time_mode == "known" else None
+        lexical_candidate_ids = (
+            set(lexical_token_hits)
+            if lexical_token_hits is not None
+            else set(self.store.candidate_event_ids_for_search_terms(query_candidate_terms(query)))
+        )
         if lexical_candidate_ids:
-            direct_events = visible_events_provider(time_window, sorted(lexical_candidate_ids))
-            if not direct_events:
-                return []
-            lexical_scores = {
-                event.id: (
-                    _score_event_lexical(event, tokens)
-                    if event.id in lexical_candidate_ids
-                    else 0.0
+            if lexical_token_hits is not None:
+                upper_bound = to_rfc3339(time_window[1] if time_window else utcnow())
+                direct_events = self.store.filter_relation_events_live_known(
+                    self.store.events_by_ids(sorted(lexical_candidate_ids)),
+                    upper_bound,
                 )
-                for event in direct_events
-            }
+                if not direct_events:
+                    return []
+                lexical_scores = self._known_lexical_scores(
+                    direct_events,
+                    tokens=tokens,
+                    lexical_token_hits=lexical_token_hits,
+                )
+            else:
+                direct_events = visible_events_provider(time_window, sorted(lexical_candidate_ids))
+                if not direct_events:
+                    return []
+                lexical_scores = {
+                    event.id: (
+                        _score_event_lexical(event, tokens)
+                        if event.id in lexical_candidate_ids
+                        else 0.0
+                    )
+                    for event in direct_events
+                }
             lexical_hit_event_ids = [
                 event.id
                 for event in direct_events
@@ -250,6 +273,42 @@ class RetrievalEngine:
 
         results.sort(key=lambda item: (-item.score, item.entity_id))
         return results[:k]
+
+    def _known_visible_lexical_candidate_hits(
+        self,
+        query: str,
+        time_window: tuple[datetime, datetime] | None,
+    ) -> dict[str, int]:
+        upper_bound = time_window[1] if time_window else utcnow()
+        lower_bound = time_window[0] if time_window else None
+        return self.store.known_visible_event_token_hits(
+            to_rfc3339(upper_bound),
+            query_token_term_groups(query),
+            from_recorded_at=to_rfc3339(lower_bound) if lower_bound else None,
+        )
+
+    def _known_lexical_scores(
+        self,
+        events: list[Event],
+        *,
+        tokens: list[QueryToken],
+        lexical_token_hits: dict[str, int],
+    ) -> dict[str, float]:
+        if not tokens:
+            return {}
+        phrase = " ".join(token.raw for token in tokens)
+        all_tokens_matched = len(tokens)
+        scores: dict[str, float] = {}
+        for event in events:
+            matched_count = lexical_token_hits.get(event.id, 0)
+            if matched_count <= 0:
+                scores[event.id] = 0.0
+                continue
+            score = matched_count / max(len(tokens), 1)
+            if phrase and matched_count >= all_tokens_matched and phrase in event_search_text(event):
+                score += 0.25
+            scores[event.id] = score
+        return scores
 
     def _known_visible_events(
         self,

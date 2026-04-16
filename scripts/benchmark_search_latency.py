@@ -1,93 +1,89 @@
 from __future__ import annotations
 
+import argparse
 import tempfile
-import time
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from pathlib import Path
 
 from engram import Engram
 
-
-def dt(value: datetime) -> datetime:
-    return value.astimezone(UTC)
+from benchmark_common import dt, measure_runs, parse_entity_counts, populate_memory, print_stats
 
 
 def main() -> None:
-    with tempfile.TemporaryDirectory(prefix="engram-bench-") as tmpdir:
+    parser = argparse.ArgumentParser(description="Measure Engram search/context latency across dataset sizes.")
+    parser.add_argument(
+        "--entity-counts",
+        default="1500,5000,10000",
+        help="Comma-separated entity counts to benchmark (default: 1500,5000,10000).",
+    )
+    parser.add_argument(
+        "--repeat",
+        type=int,
+        default=20,
+        help="How many times to run each benchmark operation per dataset size.",
+    )
+    args = parser.parse_args()
+
+    print("Search latency benchmark")
+    for entity_count in parse_entity_counts(args.entity_counts):
+        _run_for_entity_count(entity_count=entity_count, repeat=args.repeat)
+
+
+def _run_for_entity_count(*, entity_count: int, repeat: int) -> None:
+    with tempfile.TemporaryDirectory(prefix="engram-bench-search-") as tmpdir:
         root = Path(tmpdir)
         mem = Engram(user_id="bench", path=str(root))
-        base = datetime(2026, 5, 1, tzinfo=UTC)
-
-        for idx in range(1500):
-            entity_id = f"user:{idx}"
-            mem.append(
-                "entity.create",
-                {"id": entity_id, "type": "user", "attrs": {"city": f"Busan-{idx}", "tag": "traveler"}},
-                observed_at=dt(base + timedelta(minutes=idx)),
-                effective_at_start=dt(base + timedelta(minutes=idx)),
-                time_confidence="exact",
-            )
-            if idx % 5 == 0:
-                mem.append(
-                    "relation.create",
-                    {
-                        "source": entity_id,
-                        "target": f"user:{(idx + 1) % 1500}",
-                        "type": "teammate",
-                        "attrs": {"squad": "engram"},
-                    },
-                    observed_at=dt(base + timedelta(minutes=idx, seconds=30)),
-                    effective_at_start=dt(base + timedelta(minutes=idx)),
-                    time_confidence="exact",
-                )
-
+        base = populate_memory(mem, entity_count=entity_count)
         mem.flush("index")
 
-        known_elapsed = _measure(
-            lambda: mem.search("Busan-1499 traveler", k=5),
-            repeat=20,
+        print(f"\nDataset: {entity_count} entities")
+        print_stats(
+            measure_runs(
+                lambda: mem.search(f"Busan-{entity_count - 1} traveler", k=5),
+                repeat=repeat,
+                label="known lexical search",
+            )
         )
-        semantic_repeat_elapsed = _measure(
-            lambda: mem.search("travel partner", k=5),
-            repeat=20,
+        print_stats(
+            measure_runs(
+                lambda: mem.search("travel partner", k=5),
+                repeat=repeat,
+                label="repeated semantic-capable search",
+            )
         )
-        valid_relation_elapsed = _measure(
-            lambda: mem.search(
-                "teammate engram",
-                time_mode="valid",
-                time_window=(dt(base), dt(base + timedelta(days=3))),
-                k=5,
-            ),
-            repeat=20,
+        print_stats(
+            measure_runs(
+                lambda: mem.search(
+                    "teammate engram",
+                    time_mode="valid",
+                    time_window=(dt(base), dt(base + timedelta(days=3))),
+                    k=5,
+                ),
+                repeat=repeat,
+                label="valid relation-window search",
+            )
         )
-        known_context_elapsed = _measure(
-            lambda: mem.context("Busan-1499 traveler", max_tokens=400),
-            repeat=20,
+        print_stats(
+            measure_runs(
+                lambda: mem.context(f"Busan-{entity_count - 1} traveler", max_tokens=400),
+                repeat=repeat,
+                label="known context build",
+            )
         )
-        valid_context_elapsed = _measure(
-            lambda: mem.context(
-                "teammate engram",
-                time_mode="valid",
-                time_window=(dt(base), dt(base + timedelta(days=3))),
-                max_tokens=400,
-            ),
-            repeat=20,
+        print_stats(
+            measure_runs(
+                lambda: mem.context(
+                    "teammate engram",
+                    time_mode="valid",
+                    time_window=(dt(base), dt(base + timedelta(days=3))),
+                    max_tokens=400,
+                ),
+                repeat=repeat,
+                label="valid window context build",
+            )
         )
-
-        print("Search latency benchmark")
-        print(f"known lexical search: {known_elapsed:.4f}s total / 20 runs")
-        print(f"repeated semantic-capable search: {semantic_repeat_elapsed:.4f}s total / 20 runs")
-        print(f"valid relation-window search: {valid_relation_elapsed:.4f}s total / 20 runs")
-        print(f"known context build: {known_context_elapsed:.4f}s total / 20 runs")
-        print(f"valid window context build: {valid_context_elapsed:.4f}s total / 20 runs")
         mem.close()
-
-
-def _measure(fn, *, repeat: int) -> float:
-    start = time.perf_counter()
-    for _ in range(repeat):
-        fn()
-    return time.perf_counter() - start
 
 
 if __name__ == "__main__":
