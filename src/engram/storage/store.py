@@ -74,6 +74,8 @@ class EventStore:
         self._db_path = db_path
         self._tx_lock = threading.Lock()
         self._thread_local = threading.local()
+        self._reader_conns: list[sqlite3.Connection] = []
+        self._reader_conns_lock = threading.Lock()
 
     @property
     def conn(self) -> sqlite3.Connection:
@@ -88,7 +90,18 @@ class EventStore:
         if reader is None:
             reader = open_reader_connection(self._db_path)
             local.reader_conn = reader
+            with self._reader_conns_lock:
+                self._reader_conns.append(reader)
         return reader
+
+    def close_readers(self) -> None:
+        with self._reader_conns_lock:
+            for reader in self._reader_conns:
+                try:
+                    reader.close()
+                except Exception:
+                    pass
+            self._reader_conns.clear()
 
     @contextmanager
     def transaction(self):

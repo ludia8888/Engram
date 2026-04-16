@@ -381,3 +381,28 @@ def test_rebuild_does_not_swallow_concurrent_dirty_rows(tmp_path):
     assert mem.store.count_dirty_ranges() == 0
 
     mem.close()
+
+
+def test_reader_connections_are_closed_on_shutdown(tmp_path):
+    extractor = CountingExtractor()
+    mem = Engram(
+        user_id="alice",
+        path=str(tmp_path),
+        extractor=extractor,
+        auto_flush=True,
+    )
+    mem.turn(user="hello", assistant="hi", observed_at=dt("2026-05-01T10:00:00Z"))
+    _wait_for(lambda: mem.store.count_events() > 0)
+
+    reader_conns = list(mem.store._reader_conns)
+    assert len(reader_conns) >= 1
+
+    mem.close()
+
+    assert len(mem.store._reader_conns) == 0
+    for conn in reader_conns:
+        try:
+            conn.execute("SELECT 1")
+            assert False, "connection should be closed"
+        except Exception:
+            pass
