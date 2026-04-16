@@ -3,8 +3,62 @@ from __future__ import annotations
 from engram import Engram
 import engram.engram as engram_module
 import engram.retrieval as retrieval_module
+from engram.types import MeaningAnalysis, MeaningUnit, QueryMeaningPlan
 
 from tests.conftest import dt
+
+
+class StaticMeaningAnalyzer:
+    def __init__(
+        self,
+        *,
+        version: str = "meaning-static-v1",
+        event_units: dict[str, list[MeaningUnit]] | None = None,
+        query_plans: dict[str, QueryMeaningPlan] | None = None,
+    ):
+        self.version = version
+        self._event_units = {
+            key: [self._clone_unit(unit) for unit in units]
+            for key, units in (event_units or {}).items()
+        }
+        self._query_plans = {
+            key: self._clone_plan(plan)
+            for key, plan in (query_plans or {}).items()
+        }
+        self.plan_calls: list[str] = []
+
+    def analyze_event(self, event):
+        entity_id = str(event.data.get("id", ""))
+        return MeaningAnalysis(
+            units=[
+                self._clone_unit(unit)
+                for unit in self._event_units.get(entity_id, [])
+            ]
+        )
+
+    def plan_query(self, query: str) -> QueryMeaningPlan:
+        self.plan_calls.append(query)
+        plan = self._query_plans.get(query)
+        if plan is None:
+            raise AssertionError(f"missing query plan for {query!r}")
+        return self._clone_plan(plan)
+
+    def _clone_plan(self, plan: QueryMeaningPlan) -> QueryMeaningPlan:
+        return QueryMeaningPlan(
+            units=[self._clone_unit(unit) for unit in plan.units],
+            fallback_terms=list(plan.fallback_terms),
+            planner_confidence=plan.planner_confidence,
+        )
+
+    def _clone_unit(self, unit: MeaningUnit) -> MeaningUnit:
+        return MeaningUnit(
+            kind=unit.kind,
+            value=unit.value,
+            normalized_value=unit.normalized_value,
+            key=unit.key,
+            confidence=unit.confidence,
+            metadata=dict(unit.metadata),
+        )
 
 
 def test_search_returns_entity_seeded_by_matching_events(tmp_path):
@@ -188,6 +242,127 @@ def test_search_respects_valid_time_window(tmp_path):
     assert late[0].time_basis == "valid"
     assert "temporal" in late[0].matched_axes
     assert moved_event_id in late[0].supporting_event_ids
+
+    mem.close()
+
+
+def test_search_prefers_protected_phrase_meaning_hits_over_fallback_token_matches(tmp_path):
+    analyzer = StaticMeaningAnalyzer(
+        event_units={
+            "user:precise": [
+                MeaningUnit(
+                    kind="protected_phrase",
+                    value="Busan-1499",
+                    normalized_value="busan-1499",
+                    confidence=1.0,
+                ),
+                MeaningUnit(
+                    kind="facet",
+                    key="role",
+                    value="traveler",
+                    normalized_value="traveler",
+                    confidence=0.8,
+                ),
+            ],
+            "user:broad": [
+                MeaningUnit(
+                    kind="alias",
+                    value="Busan traveler",
+                    normalized_value="busan traveler",
+                    confidence=0.7,
+                ),
+                MeaningUnit(
+                    kind="facet",
+                    key="role",
+                    value="traveler",
+                    normalized_value="traveler",
+                    confidence=0.8,
+                ),
+            ],
+        },
+        query_plans={
+            "Busan-1499 traveler": QueryMeaningPlan(
+                units=[
+                    MeaningUnit(
+                        kind="protected_phrase",
+                        value="Busan-1499",
+                        normalized_value="busan-1499",
+                        confidence=1.0,
+                    ),
+                ],
+                fallback_terms=["busan-1499", "busan", "1499", "traveler"],
+                planner_confidence=0.96,
+            )
+        },
+    )
+    mem = Engram(user_id="alice", path=str(tmp_path), meaning_analyzer=analyzer)
+    mem.append(
+        "entity.create",
+        {"id": "user:precise", "type": "user", "attrs": {"label": "Busan-1499", "role": "traveler"}},
+        observed_at=dt("2026-05-01T10:00:00Z"),
+        reason="exact protected phrase entity",
+    )
+    mem.append(
+        "entity.create",
+        {"id": "user:broad", "type": "user", "attrs": {"label": "Busan", "role": "traveler"}},
+        observed_at=dt("2026-05-01T10:05:00Z"),
+        reason="broad lexical overlap entity",
+    )
+    mem.flush("index")
+
+    results = mem.search("Busan-1499 traveler", k=5)
+
+    assert results
+    assert results[0].entity_id == "user:precise"
+    assert all(result.entity_id != "user:broad" for result in results[1:])
+
+    mem.close()
+
+
+def test_search_caches_query_meaning_plan_between_calls(tmp_path):
+    analyzer = StaticMeaningAnalyzer(
+        event_units={
+            "user:precise": [
+                MeaningUnit(
+                    kind="protected_phrase",
+                    value="Busan-1499",
+                    normalized_value="busan-1499",
+                    confidence=1.0,
+                )
+            ]
+        },
+        query_plans={
+            "Busan-1499": QueryMeaningPlan(
+                units=[
+                    MeaningUnit(
+                        kind="protected_phrase",
+                        value="Busan-1499",
+                        normalized_value="busan-1499",
+                        confidence=1.0,
+                    )
+                ],
+                fallback_terms=["busan-1499", "busan", "1499"],
+                planner_confidence=0.99,
+            )
+        },
+    )
+    mem = Engram(user_id="alice", path=str(tmp_path), meaning_analyzer=analyzer)
+    mem.append(
+        "entity.create",
+        {"id": "user:precise", "type": "user", "attrs": {"label": "Busan-1499"}},
+        observed_at=dt("2026-05-01T10:00:00Z"),
+        reason="exact protected phrase entity",
+    )
+    mem.flush("index")
+
+    first = mem.search("Busan-1499", k=5)
+    second = mem.search("Busan-1499", k=5)
+
+    assert first
+    assert second
+    assert first[0].entity_id == "user:precise"
+    assert second[0].entity_id == "user:precise"
+    assert analyzer.plan_calls == ["Busan-1499"]
 
     mem.close()
 

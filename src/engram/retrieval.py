@@ -1,11 +1,18 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime
-from collections import OrderedDict
 from typing import Callable, Literal
 
+from .meaning_index import (
+    MeaningAnalyzer,
+    NullMeaningAnalyzer,
+    deserialize_query_meaning_plan,
+    normalize_query_for_meaning_cache,
+    serialize_query_meaning_plan,
+)
 from .search_terms import (
     QueryToken,
     event_search_text,
@@ -22,7 +29,7 @@ from .storage.store import (
     valid_event_sort_key,
 )
 from .time_utils import to_rfc3339, utcnow
-from .types import Event, SearchResult
+from .types import Event, MeaningUnit, QueryMeaningPlan, SearchResult
 
 
 @dataclass(slots=True)
@@ -46,12 +53,25 @@ _LEXICAL_WEIGHT = 0.6
 _SEMANTIC_MIN_SCORE = 0.35
 _CAUSAL_WEIGHT = 0.5
 _QUERY_EMBED_CACHE_SIZE = 128
+_MEANING_KIND_WEIGHTS: dict[str, float] = {
+    "protected_phrase": 2.0,
+    "canonical_key": 1.7,
+    "alias": 1.4,
+    "facet": 0.8,
+}
 
 
 class RetrievalEngine:
-    def __init__(self, store: EventStore, embedder: Embedder):
+    def __init__(
+        self,
+        store: EventStore,
+        embedder: Embedder,
+        meaning_analyzer: MeaningAnalyzer | None = None,
+    ):
         self.store = store
         self.embedder = embedder
+        self.meaning_analyzer = meaning_analyzer or NullMeaningAnalyzer()
+        self._fallback_meaning_analyzer = NullMeaningAnalyzer()
         self._query_embedding_cache: OrderedDict[tuple[str, str], list[float]] = OrderedDict()
 
     def search_known(
@@ -105,71 +125,24 @@ class RetrievalEngine:
             return []
 
         tokens = query_tokens(query)
-        direct_events: list[Event]
-        lexical_scores: dict[str, float]
-        lexical_token_hits = self._known_visible_lexical_candidate_hits(query, time_window) if time_mode == "known" else None
-        lexical_candidate_ids = (
-            set(lexical_token_hits)
-            if lexical_token_hits is not None
-            else set(self.store.candidate_event_ids_for_search_terms(query_candidate_terms(query)))
+        meaning_plan = self._query_meaning_plan(query)
+        meaning_direct = self._meaning_direct_matches(
+            meaning_plan=meaning_plan,
+            time_window=time_window,
+            visible_events_provider=visible_events_provider,
         )
-        if lexical_candidate_ids:
-            if lexical_token_hits is not None:
-                upper_bound = to_rfc3339(time_window[1] if time_window else utcnow())
-                direct_events = self.store.filter_relation_events_live_known(
-                    self.store.events_by_ids(sorted(lexical_candidate_ids)),
-                    upper_bound,
-                )
-                if not direct_events:
-                    return []
-                lexical_scores = self._known_lexical_scores(
-                    direct_events,
-                    tokens=tokens,
-                    lexical_token_hits=lexical_token_hits,
-                )
-            else:
-                direct_events = visible_events_provider(time_window, sorted(lexical_candidate_ids))
-                if not direct_events:
-                    return []
-                lexical_scores = {
-                    event.id: (
-                        _score_event_lexical(event, tokens)
-                        if event.id in lexical_candidate_ids
-                        else 0.0
-                    )
-                    for event in direct_events
-                }
-            lexical_hit_event_ids = [
-                event.id
-                for event in direct_events
-                if lexical_scores.get(event.id, 0.0) > 0
-            ]
-            if lexical_hit_event_ids:
-                lexical_hit_entity_ids = sorted(
-                    {
-                        entity_id
-                        for entity_ids in self.store.event_entity_ids_for_events(
-                            lexical_hit_event_ids
-                        ).values()
-                        for entity_id in entity_ids
-                    }
-                )
-                semantic_candidate_ids = set(
-                    self.store.event_ids_with_embeddings_for_entities(
-                        lexical_hit_entity_ids,
-                        embedder_version=self.embedder.version,
-                    )
-                )
-                loaded_event_ids = {event.id for event in direct_events}
-                extra_semantic_ids = sorted(semantic_candidate_ids - loaded_event_ids)
-                if extra_semantic_ids:
-                    for event in visible_events_provider(time_window, extra_semantic_ids):
-                        if event.id in loaded_event_ids:
-                            continue
-                        direct_events.append(event)
-                        loaded_event_ids.add(event.id)
-                        lexical_scores[event.id] = 0.0
-            else:
+        if meaning_direct is not None:
+            direct_events, lexical_scores = meaning_direct
+        else:
+            direct_events, lexical_scores = self._fallback_direct_matches(
+                query=query,
+                tokens=tokens,
+                time_mode=time_mode,
+                time_window=time_window,
+                visible_events_provider=visible_events_provider,
+                fallback_terms=meaning_plan.fallback_terms,
+            )
+            if not direct_events:
                 semantic_candidate_ids = self.store.event_ids_with_embeddings(self.embedder.version)
                 if not semantic_candidate_ids:
                     return []
@@ -177,6 +150,37 @@ class RetrievalEngine:
                 if not direct_events:
                     return []
                 lexical_scores = {event.id: 0.0 for event in direct_events}
+
+        lexical_hit_event_ids = [
+            event.id
+            for event in direct_events
+            if lexical_scores.get(event.id, 0.0) > 0
+        ]
+        if lexical_hit_event_ids:
+            lexical_hit_entity_ids = sorted(
+                {
+                    entity_id
+                    for entity_ids in self.store.event_entity_ids_for_events(
+                        lexical_hit_event_ids
+                    ).values()
+                    for entity_id in entity_ids
+                }
+            )
+            semantic_candidate_ids = set(
+                self.store.event_ids_with_embeddings_for_entities(
+                    lexical_hit_entity_ids,
+                    embedder_version=self.embedder.version,
+                )
+            )
+            loaded_event_ids = {event.id for event in direct_events}
+            extra_semantic_ids = sorted(semantic_candidate_ids - loaded_event_ids)
+            if extra_semantic_ids:
+                for event in visible_events_provider(time_window, extra_semantic_ids):
+                    if event.id in loaded_event_ids:
+                        continue
+                    direct_events.append(event)
+                    loaded_event_ids.add(event.id)
+                    lexical_scores[event.id] = 0.0
         else:
             semantic_candidate_ids = self.store.event_ids_with_embeddings(self.embedder.version)
             if not semantic_candidate_ids:
@@ -309,6 +313,138 @@ class RetrievalEngine:
                 score += 0.25
             scores[event.id] = score
         return scores
+
+    def _query_meaning_plan(self, query: str) -> QueryMeaningPlan:
+        normalized_query = normalize_query_for_meaning_cache(query)
+        if not normalized_query:
+            return QueryMeaningPlan(units=[], fallback_terms=[], planner_confidence=None)
+
+        cached = self.store.load_query_meaning_cache(
+            normalized_query,
+            self.meaning_analyzer.version,
+        )
+        if cached is not None:
+            return deserialize_query_meaning_plan(cached)
+
+        try:
+            plan = self.meaning_analyzer.plan_query(query)
+        except Exception:
+            plan = self._fallback_meaning_analyzer.plan_query(query)
+        if not plan.fallback_terms:
+            plan = QueryMeaningPlan(
+                units=list(plan.units),
+                fallback_terms=query_candidate_terms(query),
+                planner_confidence=plan.planner_confidence,
+            )
+
+        with self.store.transaction() as tx:
+            self.store.save_query_meaning_cache(
+                tx,
+                normalized_query=normalized_query,
+                analyzer_version=self.meaning_analyzer.version,
+                payload=serialize_query_meaning_plan(plan),
+                cached_at=to_rfc3339(utcnow()),
+            )
+        return plan
+
+    def _meaning_direct_matches(
+        self,
+        *,
+        meaning_plan: QueryMeaningPlan,
+        time_window: tuple[datetime, datetime] | None,
+        visible_events_provider: VisibleEventsProvider,
+    ) -> tuple[list[Event], dict[str, float]] | None:
+        lookups = self._meaning_lookups(meaning_plan.units)
+        if not lookups:
+            return None
+
+        matches = self.store.event_meaning_matches(self.meaning_analyzer.version, lookups)
+        if not matches:
+            return None
+
+        direct_events = visible_events_provider(time_window, sorted(matches))
+        if not direct_events:
+            return None
+
+        lexical_scores = {
+            event.id: self._meaning_score(matches.get(event.id, ()))
+            for event in direct_events
+        }
+        if not any(score > 0 for score in lexical_scores.values()):
+            return None
+        return direct_events, lexical_scores
+
+    def _fallback_direct_matches(
+        self,
+        *,
+        query: str,
+        tokens: list[QueryToken],
+        time_mode: Literal["known", "valid"],
+        time_window: tuple[datetime, datetime] | None,
+        visible_events_provider: VisibleEventsProvider,
+        fallback_terms: list[str],
+    ) -> tuple[list[Event], dict[str, float]]:
+        direct_events: list[Event]
+        lexical_scores: dict[str, float]
+        lexical_token_hits = self._known_visible_lexical_candidate_hits(query, time_window) if time_mode == "known" else None
+        lexical_candidate_ids = (
+            set(lexical_token_hits)
+            if lexical_token_hits is not None
+            else set(self.store.candidate_event_ids_for_search_terms(fallback_terms))
+        )
+        if lexical_candidate_ids:
+            if lexical_token_hits is not None:
+                upper_bound = to_rfc3339(time_window[1] if time_window else utcnow())
+                direct_events = self.store.filter_relation_events_live_known(
+                    self.store.events_by_ids(sorted(lexical_candidate_ids)),
+                    upper_bound,
+                )
+                if not direct_events:
+                    return [], {}
+                lexical_scores = self._known_lexical_scores(
+                    direct_events,
+                    tokens=tokens,
+                    lexical_token_hits=lexical_token_hits,
+                )
+            else:
+                direct_events = visible_events_provider(time_window, sorted(lexical_candidate_ids))
+                if not direct_events:
+                    return [], {}
+                lexical_scores = {
+                    event.id: (
+                        _score_event_lexical(event, tokens)
+                        if event.id in lexical_candidate_ids
+                        else 0.0
+                    )
+                    for event in direct_events
+                }
+            return direct_events, lexical_scores
+        return [], {}
+
+    def _meaning_lookups(
+        self,
+        units: list[MeaningUnit],
+    ) -> list[tuple[str, str, str]]:
+        lookups: list[tuple[str, str, str]] = []
+        for unit in units:
+            if unit.kind == "fallback_term":
+                continue
+            lookups.append((unit.kind, unit.key or "", unit.normalized_value))
+        return list(dict.fromkeys(lookups))
+
+    def _meaning_score(
+        self,
+        matches: list[tuple[str, str, str, float | None]] | tuple[tuple[str, str, str, float | None], ...],
+    ) -> float:
+        score = 0.0
+        seen: set[tuple[str, str, str]] = set()
+        for unit_kind, unit_key, normalized_value, confidence in matches:
+            match_key = (unit_kind, unit_key, normalized_value)
+            if match_key in seen:
+                continue
+            seen.add(match_key)
+            score += _MEANING_KIND_WEIGHTS.get(unit_kind, 0.0) * (confidence if confidence is not None else 1.0)
+        return score
 
     def _known_visible_events(
         self,

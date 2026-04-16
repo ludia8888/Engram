@@ -500,6 +500,81 @@ class EventStore:
             ],
         )
 
+    def load_query_meaning_cache(
+        self,
+        normalized_query: str,
+        analyzer_version: str,
+    ) -> str | None:
+        row = self._reader_conn.execute(
+            """
+            SELECT payload
+            FROM query_meaning_cache
+            WHERE normalized_query = ?
+              AND analyzer_version = ?
+            LIMIT 1
+            """,
+            (normalized_query, analyzer_version),
+        ).fetchone()
+        if row is None:
+            return None
+        return str(row["payload"])
+
+    def save_query_meaning_cache(
+        self,
+        tx: sqlite3.Connection,
+        *,
+        normalized_query: str,
+        analyzer_version: str,
+        payload: str,
+        cached_at: str,
+    ) -> None:
+        tx.execute(
+            """
+            INSERT OR REPLACE INTO query_meaning_cache(
+                normalized_query, analyzer_version, payload, cached_at
+            ) VALUES (?, ?, ?, ?)
+            """,
+            (normalized_query, analyzer_version, payload, cached_at),
+        )
+
+    def event_meaning_matches(
+        self,
+        analyzer_version: str,
+        lookups: list[tuple[str, str, str]],
+    ) -> dict[str, list[tuple[str, str, str, float | None]]]:
+        if not lookups:
+            return {}
+
+        clauses: list[str] = []
+        params: list[object] = [analyzer_version]
+        for unit_kind, unit_key, normalized_value in lookups:
+            clauses.append("(u.unit_kind = ? AND u.unit_key = ? AND u.normalized_value = ?)")
+            params.extend([unit_kind, unit_key, normalized_value])
+
+        lookup_sql = " OR ".join(clauses)
+        rows = self._reader_conn.execute(
+            f"""
+            SELECT u.event_id, u.unit_kind, u.unit_key, u.normalized_value, u.confidence
+            FROM event_search_units u
+            WHERE u.analyzer_version = ?
+              AND ({lookup_sql})
+            ORDER BY u.event_id ASC
+            """,
+            params,
+        ).fetchall()
+
+        matches: dict[str, list[tuple[str, str, str, float | None]]] = {}
+        for row in rows:
+            matches.setdefault(str(row["event_id"]), []).append(
+                (
+                    str(row["unit_kind"]),
+                    str(row["unit_key"] or ""),
+                    str(row["normalized_value"]),
+                    float(row["confidence"]) if row["confidence"] is not None else None,
+                )
+            )
+        return matches
+
     def candidate_event_ids_for_search_terms(self, terms: list[str]) -> list[str]:
         if not terms:
             return []

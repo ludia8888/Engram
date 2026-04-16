@@ -108,3 +108,49 @@ class MeaningIndexer:
             self.store.replace_event_search_units(tx, self.analyzer.version, unit_rows)
             self.store.append_meaning_analysis_runs(tx, run_rows)
         return len(run_rows)
+
+
+def normalize_query_for_meaning_cache(query: str) -> str:
+    return " ".join(query.strip().lower().split())
+
+
+def serialize_query_meaning_plan(plan: QueryMeaningPlan) -> str:
+    return json.dumps(
+        {
+            "units": [
+                {
+                    "kind": unit.kind,
+                    "value": unit.value,
+                    "normalized_value": unit.normalized_value,
+                    "key": unit.key,
+                    "confidence": unit.confidence,
+                    "metadata": unit.metadata,
+                }
+                for unit in plan.units
+            ],
+            "fallback_terms": list(plan.fallback_terms),
+            "planner_confidence": plan.planner_confidence,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+
+
+def deserialize_query_meaning_plan(payload: str) -> QueryMeaningPlan:
+    raw = json.loads(payload)
+    units = [
+        MeaningUnit(
+            kind=item["kind"],
+            value=item["value"],
+            normalized_value=item["normalized_value"],
+            key=item.get("key"),
+            confidence=item.get("confidence"),
+            metadata=dict(item.get("metadata") or {}),
+        )
+        for item in raw.get("units", [])
+    ]
+    return QueryMeaningPlan(
+        units=units,
+        fallback_terms=list(raw.get("fallback_terms", [])),
+        planner_confidence=raw.get("planner_confidence"),
+    )

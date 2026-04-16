@@ -11,7 +11,7 @@ from .canonical import CanonicalWorker, Extractor, NullExtractor
 from .context_builder import ContextBuilder
 from .errors import ValidationError
 from .event_ops import derive_cascade_dirty_rows_for_entity_event, derive_dirty_rows, derive_event_entities, validate_event
-from .meaning_index import MeaningIndexer, NullMeaningAnalyzer
+from .meaning_index import MeaningAnalyzer, MeaningIndexer, NullMeaningAnalyzer
 from .projector import Projector
 from .recovery import RecoveryService
 from .retrieval import RetrievalEngine
@@ -51,6 +51,7 @@ class Engram:
         queue_put_timeout: float = 1.0,
         extractor: Extractor | None = None,
         embedder: Embedder | None = None,
+        meaning_analyzer: MeaningAnalyzer | None = None,
         auto_flush: bool = False,
     ):
         from .retry import RetryPolicy
@@ -65,7 +66,7 @@ class Engram:
         self.queue_put_timeout = queue_put_timeout
         self.extractor = extractor or NullExtractor()
         self.embedder = embedder or HashEmbedder()
-        self.meaning_analyzer = NullMeaningAnalyzer()
+        self.meaning_analyzer = meaning_analyzer or NullMeaningAnalyzer()
 
         self._writer_lock = WriterLock(self.root / ".writer.lock")
         self.conn = None
@@ -80,7 +81,7 @@ class Engram:
             self.canonical_worker = CanonicalWorker(self.store, self.extractor)
             self.semantic_indexer = SemanticIndexer(self.store, self.embedder)
             self.meaning_indexer = MeaningIndexer(self.store, self.meaning_analyzer)
-            self.retrieval = RetrievalEngine(self.store, self.embedder)
+            self.retrieval = RetrievalEngine(self.store, self.embedder, self.meaning_analyzer)
             self.context_builder = ContextBuilder(self.store, self.raw_log.raw_get)
             self.queue: queue.Queue[QueueItem] = queue.Queue(maxsize=queue_max_size)
             self.recovery = RecoveryService(
