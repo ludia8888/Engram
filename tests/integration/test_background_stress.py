@@ -198,3 +198,186 @@ def test_worker_survives_rapid_open_close_cycle(tmp_path):
     runs = final.store.list_extraction_runs()
     assert len(runs) >= 1
     final.close()
+
+
+def test_concurrent_multi_reader_during_background_writes(tmp_path):
+    extractor = CountingExtractor()
+    mem = Engram(
+        user_id="alice",
+        path=str(tmp_path),
+        extractor=extractor,
+        auto_flush=True,
+    )
+    mem.append(
+        "entity.create",
+        {"id": "user:alice", "type": "user", "attrs": {"location": "Busan"}},
+        observed_at=dt("2026-05-01T09:00:00Z"),
+    )
+    mem.flush("all")
+
+    for i in range(20):
+        mem.turn(user=f"msg {i}", assistant=f"reply {i}", observed_at=dt("2026-05-01T10:00:00Z"))
+
+    errors: list[tuple[str, Exception]] = []
+
+    def reader_loop(label, fn):
+        try:
+            for _ in range(50):
+                fn()
+                time.sleep(0.005)
+        except Exception as exc:
+            errors.append((label, exc))
+
+    threads = [
+        threading.Thread(target=reader_loop, args=("get", lambda: mem.get("user:alice"))),
+        threading.Thread(target=reader_loop, args=("search", lambda: mem.search("Busan", k=5))),
+        threading.Thread(target=reader_loop, args=("context", lambda: mem.context("Busan", max_tokens=200))),
+        threading.Thread(target=reader_loop, args=("history", lambda: mem.known_history("user:alice"))),
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=20.0)
+
+    assert not errors, f"reader errors: {errors}"
+    assert _wait_for(lambda: extractor.call_count >= 20, timeout=15.0)
+    assert mem._background_worker.is_alive
+    mem.close()
+
+
+def test_append_and_background_write_seq_monotonic(tmp_path):
+    extractor = CountingExtractor()
+    mem = Engram(
+        user_id="alice",
+        path=str(tmp_path),
+        extractor=extractor,
+        auto_flush=True,
+    )
+
+    for i in range(15):
+        mem.turn(user=f"msg {i}", assistant=f"reply {i}", observed_at=dt("2026-05-01T10:00:00Z"))
+
+    errors: list[Exception] = []
+
+    def append_loop():
+        try:
+            for i in range(20):
+                mem.append(
+                    "entity.create",
+                    {"id": f"item:{i}", "type": "item", "attrs": {"n": i}},
+                    observed_at=dt("2026-05-01T10:00:00Z"),
+                )
+        except Exception as exc:
+            errors.append(exc)
+
+    t = threading.Thread(target=append_loop)
+    t.start()
+    t.join(timeout=15.0)
+
+    assert not errors, f"append errors: {errors}"
+    assert _wait_for(lambda: extractor.call_count >= 15, timeout=15.0)
+
+    seqs = [row[0] for row in mem.conn.execute("SELECT seq FROM events ORDER BY seq").fetchall()]
+    assert seqs == list(range(1, len(seqs) + 1))
+    mem.close()
+
+
+def test_reader_connection_refuses_writes(tmp_path):
+    import sqlite3
+
+    mem = Engram(
+        user_id="alice",
+        path=str(tmp_path),
+        auto_flush=True,
+    )
+    reader = mem.store._reader_conn
+    assert reader is not mem.store._writer_conn
+    try:
+        reader.execute("DELETE FROM events")
+        assert False, "reader should refuse writes"
+    except sqlite3.OperationalError:
+        pass
+    mem.close()
+
+
+def test_projection_state_atomic_consistency(tmp_path):
+    extractor = CountingExtractor()
+    mem = Engram(
+        user_id="alice",
+        path=str(tmp_path),
+        extractor=extractor,
+        auto_flush=True,
+    )
+    mem.append(
+        "entity.create",
+        {"id": "user:alice", "type": "user", "attrs": {"name": "Alice"}},
+        observed_at=dt("2026-05-01T09:00:00Z"),
+    )
+    mem.append(
+        "entity.create",
+        {"id": "user:bob", "type": "user", "attrs": {"name": "Bob"}},
+        observed_at=dt("2026-05-01T09:00:00Z"),
+    )
+    mem.append(
+        "relation.create",
+        {"source": "user:alice", "target": "user:bob", "type": "friend", "attrs": {}},
+        observed_at=dt("2026-05-01T09:00:00Z"),
+    )
+    mem.flush("all")
+
+    for i in range(20):
+        mem.turn(user=f"msg {i}", assistant=f"reply {i}", observed_at=dt("2026-05-01T10:00:00Z"))
+
+    errors: list[Exception] = []
+
+    def check_consistency():
+        try:
+            for _ in range(200):
+                state = mem.projector._state
+                assert isinstance(state.version, int)
+                assert state.entities is not None
+                assert state.relations is not None
+                time.sleep(0.002)
+        except Exception as exc:
+            errors.append(exc)
+
+    t = threading.Thread(target=check_consistency)
+    t.start()
+    t.join(timeout=15.0)
+
+    assert not errors, f"consistency errors: {errors}"
+    mem.close()
+
+
+def test_rebuild_does_not_swallow_concurrent_dirty_rows(tmp_path):
+    mem = Engram(user_id="alice", path=str(tmp_path))
+    mem.append(
+        "entity.create",
+        {"id": "user:alice", "type": "user", "attrs": {"v": 1}},
+        observed_at=dt("2026-05-01T10:00:00Z"),
+    )
+
+    dirty_before = mem.store.count_dirty_ranges()
+    assert dirty_before > 0
+
+    captured_ids = mem.store.dirty_range_ids_for_owners(["user:alice"])
+
+    mem.append(
+        "entity.update",
+        {"id": "user:alice", "attrs": {"v": 2}},
+        observed_at=dt("2026-05-01T10:01:00Z"),
+    )
+
+    with mem.store.transaction() as tx:
+        mem.store.clear_dirty_range_ids(tx, captured_ids)
+
+    remaining = mem.store.count_dirty_ranges()
+    assert remaining > 0, "new dirty row from concurrent append must survive"
+
+    mem.flush("projection")
+    entity = mem.get("user:alice")
+    assert entity is not None
+    assert entity.attrs == {"v": 2}
+    assert mem.store.count_dirty_ranges() == 0
+
+    mem.close()

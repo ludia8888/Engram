@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Mapping
 from uuid import uuid4
@@ -10,23 +11,33 @@ from .time_utils import from_rfc3339, utcnow
 from .types import Entity, RelationEdge, SnapshotRow
 
 
+@dataclass(frozen=True)
+class ProjectionState:
+    entities: Mapping[str, Entity]
+    relations: Mapping[str, tuple[RelationEdge, ...]]
+    version: int
+    certified_seq: int = 0
+
+
 class Projector:
     def __init__(self, store: EventStore):
         self.store = store
-        self._snapshot: Mapping[str, Entity] = MappingProxyType({})
-        self._relation_snapshot: Mapping[str, tuple[RelationEdge, ...]] = MappingProxyType({})
-        self._projection_version: int = 0
+        self._state = ProjectionState(
+            entities=MappingProxyType({}),
+            relations=MappingProxyType({}),
+            version=0,
+        )
         self._snapshot_last_seq: int = 0
 
     def current_snapshot(self) -> Mapping[str, Entity]:
-        return self._snapshot
+        return self._state.entities
 
     @property
     def snapshot_last_seq(self) -> int:
         return self._snapshot_last_seq
 
     def current_relation_snapshot(self) -> Mapping[str, tuple[RelationEdge, ...]]:
-        return self._relation_snapshot
+        return self._state.relations
 
     def _materialize_owner(self, owner_id: str) -> tuple[Entity | None, tuple[RelationEdge, ...]]:
         entity = self.store.materialize_current_entity(owner_id)
@@ -58,17 +69,24 @@ class Projector:
         if not owners:
             return 0
 
-        new_snapshot = dict(self._snapshot)
-        new_relation_snapshot = dict(self._relation_snapshot)
+        captured_range_ids = self.store.dirty_range_ids_for_owners(owners)
+
+        state = self._state
+        new_snapshot = dict(state.entities)
+        new_relation_snapshot = dict(state.relations)
         for owner_id in owners:
             self._apply_owner_materialization(owner_id, new_snapshot, new_relation_snapshot)
 
         with self.store.transaction() as tx:
-            self.store.clear_dirty_ranges_for_owners(tx, owners)
+            self.store.clear_dirty_range_ids(tx, captured_range_ids)
+            seq_at_clear = self.store.next_seq(tx) - 1
 
-        self._snapshot = MappingProxyType(new_snapshot)
-        self._relation_snapshot = MappingProxyType(new_relation_snapshot)
-        self._projection_version += 1
+        self._state = ProjectionState(
+            entities=MappingProxyType(new_snapshot),
+            relations=MappingProxyType(new_relation_snapshot),
+            version=state.version + 1,
+            certified_seq=seq_at_clear,
+        )
         return len(owners)
 
     def rebuild_owner(self, owner_id: str, *, related_owner_ids: list[str] | None = None) -> int:
@@ -87,25 +105,33 @@ class Projector:
         return rebuilt_total
 
     def rebuild_all(self) -> int:
-        owners = sorted(set(self.store.all_entity_ids()) | set(self._snapshot.keys()) | set(self._relation_snapshot.keys()))
+        state = self._state
+        owners = sorted(set(self.store.all_entity_ids()) | set(state.entities.keys()) | set(state.relations.keys()))
+        captured_range_ids = self.store.dirty_range_ids_for_owners(owners)
+
         new_snapshot: dict[str, Entity] = {}
         new_relation_snapshot: dict[str, tuple[RelationEdge, ...]] = {}
         for owner_id in owners:
             self._apply_owner_materialization(owner_id, new_snapshot, new_relation_snapshot)
 
         with self.store.transaction() as tx:
-            self.store.clear_all_dirty_ranges(tx)
+            self.store.clear_dirty_range_ids(tx, captured_range_ids)
+            seq_at_clear = self.store.next_seq(tx) - 1
 
-        self._snapshot = MappingProxyType(new_snapshot)
-        self._relation_snapshot = MappingProxyType(new_relation_snapshot)
-        self._projection_version += 1
+        self._state = ProjectionState(
+            entities=MappingProxyType(new_snapshot),
+            relations=MappingProxyType(new_relation_snapshot),
+            version=state.version + 1,
+            certified_seq=seq_at_clear,
+        )
         return len(owners)
 
     def save_snapshot(self) -> str | None:
-        if not self._snapshot and not self._relation_snapshot:
+        state = self._state
+        if not state.entities and not state.relations:
             return None
 
-        last_seq = self.store.current_max_seq()
+        last_seq = state.certified_seq
         if last_seq == 0:
             return None
 
@@ -113,14 +139,14 @@ class Projector:
         if max_recorded_at_str is None:
             return None
 
-        state_blob, relation_blob = serialize_snapshot(self._snapshot, self._relation_snapshot)
+        state_blob, relation_blob = serialize_snapshot(state.entities, state.relations)
         snapshot_id = str(uuid4())
         row = SnapshotRow(
             id=snapshot_id,
             basis="known",
             created_at=utcnow(),
             last_seq=last_seq,
-            projection_version=self._projection_version,
+            projection_version=state.version,
             max_recorded_at_included=from_rfc3339(max_recorded_at_str),
             max_effective_at_included=None,
             state_blob=state_blob,
@@ -141,8 +167,11 @@ class Projector:
             with self.store.transaction() as tx:
                 self.store.delete_snapshot_by_id(tx, row.id)
             return False
-        self._snapshot = MappingProxyType(entities)
-        self._relation_snapshot = MappingProxyType(relations)
-        self._projection_version = row.projection_version
+        self._state = ProjectionState(
+            entities=MappingProxyType(entities),
+            relations=MappingProxyType(relations),
+            version=row.projection_version,
+            certified_seq=row.last_seq,
+        )
         self._snapshot_last_seq = row.last_seq
         return True

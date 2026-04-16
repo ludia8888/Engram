@@ -70,7 +70,7 @@ class Engram:
         self._writer_lock.acquire()
         try:
             self.conn = open_connection(self.db_path)
-            self.store = EventStore(self.conn)
+            self.store = EventStore(self.conn, db_path=self.db_path if auto_flush else None)
             self.raw_log = SegmentedRawLog(self.root / "raw")
             self._bind_extractor_runtime_context()
             self.projector = Projector(self.store)
@@ -167,10 +167,10 @@ class Engram:
         effective_start = ensure_utc(effective_at_start, "effective_at_start") if effective_at_start else None
         effective_end = ensure_utc(effective_at_end, "effective_at_end") if effective_at_end else None
         validate_event(event_type, data)
-        if caused_by is not None and not self.store.event_exists(caused_by):
-            raise ValidationError(f"caused_by event not found: {caused_by}")
 
         with self.store.transaction() as tx:
+            if caused_by is not None and not self.store.event_exists_in_tx(tx, caused_by):
+                raise ValidationError(f"caused_by event not found: {caused_by}")
             recorded_at = utcnow()
             event = Event(
                 id=str(uuid4()),
