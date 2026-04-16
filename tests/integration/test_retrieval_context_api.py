@@ -1,7 +1,10 @@
 from __future__ import annotations
 
-from engram import Engram
+import types
+
+from engram import Engram, OpenAIMeaningAnalyzer
 import engram.engram as engram_module
+import engram.openai_meaning_analyzer as openai_meaning_module
 import engram.retrieval as retrieval_module
 from engram.types import MeaningAnalysis, MeaningUnit, QueryMeaningPlan
 
@@ -363,6 +366,73 @@ def test_search_caches_query_meaning_plan_between_calls(tmp_path):
     assert first[0].entity_id == "user:precise"
     assert second[0].entity_id == "user:precise"
     assert analyzer.plan_calls == ["Busan-1499"]
+
+    mem.close()
+
+
+def test_search_uses_openai_meaning_analyzer_end_to_end(tmp_path, monkeypatch):
+    responses = [
+        {
+            "units": [
+                {"kind": "protected_phrase", "value": "Busan-1499", "confidence": 0.98},
+                {"kind": "facet", "key": "role", "value": "traveler", "confidence": 0.8},
+            ]
+        },
+        {
+            "units": [
+                {"kind": "alias", "value": "Busan traveler", "confidence": 0.72},
+            ]
+        },
+        {
+            "units": [
+                {"kind": "protected_phrase", "value": "Busan-1499", "confidence": 0.99},
+            ],
+            "planner_confidence": 0.92,
+        },
+    ]
+
+    class FakeCompletions:
+        def create(self, **kwargs):
+            if not responses:
+                raise AssertionError("no fake OpenAI responses left")
+            payload = responses.pop(0)
+            import json
+
+            return types.SimpleNamespace(
+                choices=[
+                    types.SimpleNamespace(
+                        message=types.SimpleNamespace(content=json.dumps(payload, ensure_ascii=False), refusal=None),
+                        finish_reason="stop",
+                    )
+                ]
+            )
+
+    class FakeOpenAI:
+        def __init__(self, *, api_key=None, base_url=None):
+            self.chat = types.SimpleNamespace(completions=FakeCompletions())
+
+    monkeypatch.setattr(openai_meaning_module, "_load_openai_client_class", lambda: FakeOpenAI)
+
+    analyzer = OpenAIMeaningAnalyzer()
+    mem = Engram(user_id="alice", path=str(tmp_path), meaning_analyzer=analyzer)
+    mem.append(
+        "entity.create",
+        {"id": "user:precise", "type": "user", "attrs": {"label": "Busan-1499", "role": "traveler"}},
+        observed_at=dt("2026-05-01T10:00:00Z"),
+        reason="exact protected phrase entity",
+    )
+    mem.append(
+        "entity.create",
+        {"id": "user:broad", "type": "user", "attrs": {"label": "Busan", "role": "traveler"}},
+        observed_at=dt("2026-05-01T10:05:00Z"),
+        reason="broad lexical overlap entity",
+    )
+    mem.flush("index")
+
+    results = mem.search("Busan-1499 traveler", k=5)
+
+    assert results
+    assert results[0].entity_id == "user:precise"
 
     mem.close()
 
