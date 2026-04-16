@@ -371,7 +371,66 @@ flowchart TB
 
 ---
 
-## 플러그 가능한 컴포넌트
+## 모델 설정
+
+Engram은 환경변수만으로 **어떤 LLM이든** 사용할 수 있습니다. 모든 컴포넌트는 기본적으로 로컬 무료 구현을 사용하며, OpenAI 호환 API를 지원하는 어떤 제공자든 연결 가능합니다.
+
+### 빠른 설정 예시
+
+```bash
+# OpenAI (기본)
+export ENGRAM_EXTRACTOR=openai
+export OPENAI_API_KEY=sk-...
+engram-server
+
+# Claude (OpenRouter 프록시 경유)
+export ENGRAM_EXTRACTOR=openai
+export ENGRAM_OPENAI_BASE_URL=https://openrouter.ai/api/v1
+export ENGRAM_OPENAI_MODEL=anthropic/claude-sonnet-4.6
+export OPENAI_API_KEY=sk-or-...
+engram-server
+
+# Gemini (Google AI 경유)
+export ENGRAM_EXTRACTOR=openai
+export ENGRAM_OPENAI_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai
+export ENGRAM_OPENAI_MODEL=gemini-2.5-flash
+export OPENAI_API_KEY=AIza...
+engram-server
+
+# 로컬 모델 (Ollama)
+export ENGRAM_EXTRACTOR=openai
+export ENGRAM_OPENAI_BASE_URL=http://localhost:11434/v1
+export ENGRAM_OPENAI_MODEL=llama3
+export OPENAI_API_KEY=unused
+engram-server
+```
+
+### 전체 환경변수
+
+| 변수 | 기본값 | 설명 |
+|------|--------|------|
+| `ENGRAM_EXTRACTOR` | `null` | `null` (추출 없음) 또는 `openai` |
+| `ENGRAM_EMBEDDER` | `hash` | `hash` (로컬, $0) 또는 `openai` |
+| `ENGRAM_MEANING_ANALYZER` | `null` | `null` (미닝 분석 없음) 또는 `openai` |
+| `OPENAI_API_KEY` | — | 제공자의 API 키 |
+| `ENGRAM_OPENAI_BASE_URL` | — | 커스텀 엔드포인트 (프록시, Azure, 로컬) |
+| `ENGRAM_OPENAI_MODEL` | `gpt-5.4-mini` | 추출기용 채팅 모델 |
+| `ENGRAM_OPENAI_EMBED_MODEL` | `text-embedding-3-small` | 임베딩 모델 |
+| `ENGRAM_OPENAI_EMBED_DIMS` | — | 임베딩 차원 오버라이드 |
+| `ENGRAM_OPENAI_MEANING_MODEL` | `gpt-5.4-mini` | 미닝 분석기용 채팅 모델 |
+
+### 호환 모델
+
+OpenAI 호환 API를 제공하는 모든 모델이 작동합니다.
+
+| 제공자 | 모델 | Base URL |
+|--------|------|----------|
+| **OpenAI** | gpt-5.4-mini, gpt-5.4, gpt-4o-mini | *(기본)* |
+| **Anthropic** (프록시 경유) | claude-sonnet-4.6, claude-haiku-4.5 | OpenRouter / LiteLLM |
+| **Google** (프록시 경유) | gemini-2.5-flash, gemini-2.5-pro | Google AI / OpenRouter |
+| **로컬** | llama3, mistral, phi-3 | Ollama / vLLM |
+
+### 플러그 가능한 컴포넌트
 
 | 컴포넌트 | 기본값 ($0) | OpenAI 옵션 |
 |---------|------------|------------|
@@ -379,7 +438,7 @@ flowchart TB
 | **임베더** | `HashEmbedder` | `OpenAIEmbedder` — 시맨틱 벡터 검색 |
 | **미닝 분석기** | `NullMeaningAnalyzer` | `OpenAIMeaningAnalyzer` — IDF 가중 의미 검색 |
 
-모든 컴포넌트가 Protocol 기반 — Claude, Gemini, 로컬 모델 등 어떤 LLM이든 연결 가능합니다.
+Protocol 인터페이스를 구현하면 어떤 LLM이든 연결할 수 있습니다.
 
 ---
 

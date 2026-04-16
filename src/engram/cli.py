@@ -5,69 +5,20 @@ import json
 import os
 import sys
 
-from .canonical import NullExtractor
+from .config import build_embedder, build_extractor, build_meaning_analyzer
 from .engram import Engram
-from .meaning_index import NullMeaningAnalyzer
-from .semantic import HashEmbedder
-from .time_utils import from_rfc3339, to_rfc3339
+from .time_utils import to_rfc3339
 
 
 def _build_engram(args) -> Engram:
     return Engram(
         user_id=args.user_id,
         path=args.path,
-        extractor=_build_extractor(),
-        embedder=_build_embedder(),
-        meaning_analyzer=_build_meaning_analyzer(),
+        extractor=build_extractor(),
+        embedder=build_embedder(),
+        meaning_analyzer=build_meaning_analyzer(),
         auto_flush=False,
     )
-
-
-def _build_extractor():
-    name = os.environ.get("ENGRAM_EXTRACTOR", "null")
-    if name == "null":
-        return NullExtractor()
-    if name == "openai":
-        from .openai_extractor import OpenAIExtractor
-
-        return OpenAIExtractor(
-            api_key=os.environ.get("OPENAI_API_KEY"),
-            model=os.environ.get("ENGRAM_OPENAI_MODEL", "gpt-5.4-mini"),
-            base_url=os.environ.get("ENGRAM_OPENAI_BASE_URL"),
-        )
-    raise ValueError(f"Unknown extractor: {name}")
-
-
-def _build_embedder():
-    name = os.environ.get("ENGRAM_EMBEDDER", "hash")
-    if name == "hash":
-        return HashEmbedder()
-    if name == "openai":
-        from .semantic import OpenAIEmbedder
-
-        dims = os.environ.get("ENGRAM_OPENAI_EMBED_DIMS")
-        return OpenAIEmbedder(
-            api_key=os.environ.get("OPENAI_API_KEY"),
-            model=os.environ.get("ENGRAM_OPENAI_EMBED_MODEL", "text-embedding-3-small"),
-            dimensions=int(dims) if dims else None,
-            base_url=os.environ.get("ENGRAM_OPENAI_BASE_URL"),
-        )
-    raise ValueError(f"Unknown embedder: {name}")
-
-
-def _build_meaning_analyzer():
-    name = os.environ.get("ENGRAM_MEANING_ANALYZER", "null")
-    if name == "null":
-        return NullMeaningAnalyzer()
-    if name == "openai":
-        from .openai_meaning_analyzer import OpenAIMeaningAnalyzer
-
-        return OpenAIMeaningAnalyzer(
-            api_key=os.environ.get("OPENAI_API_KEY"),
-            model=os.environ.get("ENGRAM_OPENAI_MEANING_MODEL", "gpt-5.4-mini"),
-            base_url=os.environ.get("ENGRAM_OPENAI_BASE_URL"),
-        )
-    raise ValueError(f"Unknown meaning analyzer: {name}")
 
 
 def cmd_turn(args) -> None:

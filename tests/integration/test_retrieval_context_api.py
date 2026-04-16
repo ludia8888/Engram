@@ -755,7 +755,9 @@ def test_query_meaning_cache_is_pruned(tmp_path, monkeypatch):
             is not None
         )
 
-    assert mem.store.count_query_meaning_cache(analyzer.version) == 2
+    assert _wait_for(
+        lambda: mem.store.count_query_meaning_cache(analyzer.version) == 2
+    ), f"expected 2, got {mem.store.count_query_meaning_cache(analyzer.version)}"
     assert mem.store.load_query_meaning_cache(
         normalize_query_for_meaning_cache("query-one"),
         analyzer.version,
